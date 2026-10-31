@@ -1,0 +1,5 @@
+# Check text files out with LF everywhere. config.example.toml is embedded with include_str!
+# and must match what toml_edit writes back (LF), including in the Windows release build.
+* text=auto eol=lf
+# Registry Editor expects CRLF.
+*.reg text eol=crlf
