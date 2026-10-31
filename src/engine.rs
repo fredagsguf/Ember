@@ -45,44 +45,27 @@ impl ProcessWatcher {
         Ok(ProcessWatcher { sys })
     }
 
+    /// Running processes (only scanned if a rule needs them) and the focused process.
     pub fn snapshot(&mut self, cfg: &Config, backend: &mut dyn Backend) -> Snapshot {
         let mut snap = Snapshot::default();
-        let need_all = cfg.rules.iter().any(|r| r.when == When::Running);
-        let need_focus = cfg.rules.iter().any(|r| r.when == When::Focused);
-        let focused_pid = if need_focus {
-            backend.focused_pid()
-        } else {
-            None
-        };
-
-        let kind = ProcessRefreshKind::nothing();
-        if need_all {
-            self.sys
-                .refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
+        if cfg.rules.iter().any(|r| r.when == When::Running) {
+            self.sys.refresh_processes_specifics(
+                ProcessesToUpdate::All,
+                true,
+                ProcessRefreshKind::nothing(),
+            );
             snap.running = self
                 .sys
                 .processes()
                 .values()
                 .map(|p| rules::normalize(&p.name().to_string_lossy()))
                 .collect();
-        } else if let Some(pid) = focused_pid {
-            // Only look up the one process we care about; much cheaper than a full scan.
-            self.sys.refresh_processes_specifics(
-                ProcessesToUpdate::Some(&[Pid::from_u32(pid)]),
-                true,
-                kind,
-            );
         }
-        if let Some(pid) = focused_pid {
-            snap.focused = self
-                .sys
-                .process(Pid::from_u32(pid))
-                .map(|p| rules::normalize(&p.name().to_string_lossy()));
-        }
+        snap.focused = self.focused_name(backend);
         snap
     }
 
-    /// Name of the focused process, for `ember processes`.
+    /// Name of the process owning the foreground window. Only refreshes that one process.
     pub fn focused_name(&mut self, backend: &mut dyn Backend) -> Option<String> {
         let pid = Pid::from_u32(backend.focused_pid()?);
         self.sys.refresh_processes_specifics(

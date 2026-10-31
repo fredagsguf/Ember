@@ -1,22 +1,14 @@
-//! Ember — an open-source f.lux alternative with per-game rules.
-
-mod color;
-mod config;
-mod engine;
-mod gamma;
-mod rules;
-mod schedule;
-mod solar;
+//! `ember` — command-line front-end. See also `ember-tray`.
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use color::ColorSetting;
-use config::Config;
-use engine::{ProcessWatcher, Reason};
+use ember::color::ColorSetting;
+use ember::config::{self, Config};
+use ember::daemon::{self, Msg, State};
+use ember::engine::{self, ProcessWatcher};
+use ember::gamma;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant, SystemTime};
+use std::sync::Mutex;
 
 #[derive(Parser)]
 #[command(
@@ -164,10 +156,6 @@ fn load_or_default(path: &Path) -> Result<Config> {
     }
 }
 
-fn mtime(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
-}
-
 fn status(path: &Path) -> Result<()> {
     let cfg = load_or_default(path)?;
     let mut backend = gamma::open(false).or_else(|e| {
@@ -198,106 +186,15 @@ fn status(path: &Path) -> Result<()> {
 }
 
 fn run(path: &Path, dry_run: bool) -> Result<()> {
-    let mut cfg = load_or_default(path)?;
-    let mut cfg_mtime = mtime(path);
-    let mut backend = gamma::open(dry_run)?;
-    let mut watcher = ProcessWatcher::new()?;
-
-    let stop = Arc::new(AtomicBool::new(false));
-    {
-        let stop = stop.clone();
-        ctrlc::set_handler(move || stop.store(true, Ordering::SeqCst))
-            .context("installing signal handler")?;
-    }
-
-    log::info!(
-        "ember running with backend {} ({} rule(s))",
-        backend.name(),
-        cfg.rules.len()
-    );
-    let mut current: Option<ColorSetting> = None;
-    let mut last_reason: Option<Reason> = None;
-
-    while !stop.load(Ordering::SeqCst) {
-        // Live config reload.
-        let m = mtime(path);
-        if m != cfg_mtime {
-            cfg_mtime = m;
-            match load_or_default(path) {
-                Ok(c) => {
-                    log::info!("config reloaded ({} rule(s))", c.rules.len());
-                    cfg = c;
-                }
-                Err(e) => log::error!("keeping previous config: {e:#}"),
-            }
-        }
-
-        let snap = watcher.snapshot(&cfg, backend.as_mut());
-        let d = engine::decide(&cfg, &snap);
-        if last_reason.as_ref() != Some(&d.reason) {
-            log::info!(
-                "{}K @ {:.0}% ({})",
-                d.setting.temperature,
-                d.setting.brightness * 100.0,
-                d.reason
-            );
-        }
-
-        // Fade only on a state change (rule on/off, pause); schedule changes are already gradual.
-        let state_changed = last_reason.is_some() && last_reason.as_ref() != Some(&d.reason);
-        match current {
-            Some(from) if state_changed && cfg.general.fade_secs > 0.0 => fade(
-                backend.as_mut(),
-                from,
-                d.setting,
-                cfg.general.fade_secs,
-                &stop,
-            ),
-            // Re-apply every tick: games, driver resets and display hot-plugs can clobber the ramp.
-            _ => apply(backend.as_mut(), d.setting),
-        }
-        current = Some(d.setting);
-        last_reason = Some(d.reason);
-
-        sleep_interruptible(
-            Duration::from_secs(cfg.general.poll_interval_secs.max(1)),
-            &stop,
-        );
-    }
-
-    log::info!("restoring neutral colours");
-    backend.restore()
-}
-
-fn apply(backend: &mut dyn gamma::Backend, s: ColorSetting) {
-    if let Err(e) = backend.apply(s) {
-        log::debug!("apply failed: {e:#}");
-    }
-}
-
-fn fade(
-    backend: &mut dyn gamma::Backend,
-    from: ColorSetting,
-    to: ColorSetting,
-    secs: f64,
-    stop: &AtomicBool,
-) {
-    const STEP: Duration = Duration::from_millis(30);
-    let total = Duration::from_secs_f64(secs);
-    let start = Instant::now();
-    loop {
-        let t = (start.elapsed().as_secs_f64() / total.as_secs_f64()).min(1.0);
-        apply(backend, color::lerp(from, to, t));
-        if t >= 1.0 || stop.load(Ordering::SeqCst) {
-            break;
-        }
-        std::thread::sleep(STEP);
-    }
-}
-
-fn sleep_interruptible(d: Duration, stop: &AtomicBool) {
-    let end = Instant::now() + d;
-    while Instant::now() < end && !stop.load(Ordering::SeqCst) {
-        std::thread::sleep(Duration::from_millis(100).min(end - Instant::now()));
-    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    ctrlc::set_handler(move || {
+        let _ = tx.send(Msg::Stop);
+    })
+    .context("installing signal handler")?;
+    let state = Mutex::new(State::Starting);
+    let opts = daemon::Options {
+        config_path: path.to_path_buf(),
+        dry_run,
+    };
+    daemon::run(&opts, rx, &state)
 }

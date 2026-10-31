@@ -19,11 +19,14 @@ log = "0.4.35"
 serde = { version = "1.0.229", features = ["derive"] }
 sysinfo = "0.40.1"
 toml = "1.1.8"
+toml_edit = "0.25.17"
 
 [target."cfg(windows)".dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_ColorSystem"] }
+tray-icon = "0.26.1"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_ColorSystem", "Win32_UI_Shell", "Win32_System_Registry", "Win32_System_LibraryLoader"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3.7", default-features = false, features = ["blocking", "async-io"] }
 x11rb = { version = "0.14.0", features = ["randr"] }
 
 [profile.release]

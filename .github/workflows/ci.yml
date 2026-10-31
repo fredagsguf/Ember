@@ -24,5 +24,7 @@ jobs:
           name: ember-${{ matrix.os }}
           path: |
             target/release/ember
+            target/release/ember-tray
             target/release/ember.exe
+            target/release/ember-tray.exe
           if-no-files-found: ignore
