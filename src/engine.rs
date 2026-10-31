@@ -15,6 +15,8 @@ pub enum Reason {
     Schedule,
     Rule(String),
     Paused,
+    /// The settings window is showing a slider value on screen.
+    Preview,
 }
 
 impl std::fmt::Display for Reason {
@@ -23,6 +25,7 @@ impl std::fmt::Display for Reason {
             Reason::Schedule => write!(f, "schedule"),
             Reason::Rule(r) => write!(f, "rule \"{r}\""),
             Reason::Paused => write!(f, "paused"),
+            Reason::Preview => write!(f, "settings preview"),
         }
     }
 }
@@ -135,8 +138,58 @@ pub fn clear_pause() -> std::io::Result<()> {
     }
 }
 
+fn preview_file() -> PathBuf {
+    crate::config::state_dir().join("preview")
+}
+
+/// A preview counts as live this long after the settings window last wrote it.
+const PREVIEW_TTL: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Called repeatedly by the settings window while a slider is being dragged.
+pub fn set_preview(s: ColorSetting) -> std::io::Result<()> {
+    std::fs::create_dir_all(crate::config::state_dir())?;
+    std::fs::write(
+        preview_file(),
+        format!("{} {}", s.temperature, s.brightness),
+    )
+}
+
+pub fn clear_preview() {
+    let _ = std::fs::remove_file(preview_file());
+}
+
+pub fn preview() -> Option<ColorSetting> {
+    let path = preview_file();
+    let age = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()?
+        .elapsed()
+        .ok()?;
+    if age > PREVIEW_TTL {
+        return None;
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut it = text.split_whitespace();
+    let temperature = it.next()?.parse().ok()?;
+    let brightness = it.next()?.parse().ok()?;
+    Some(
+        ColorSetting {
+            temperature,
+            brightness,
+        }
+        .clamped(),
+    )
+}
+
 pub fn decide(cfg: &Config, snap: &Snapshot) -> Decision {
     let scheduled = schedule::scheduled_setting(cfg, Local::now());
+    if let Some(p) = preview() {
+        return Decision {
+            setting: p,
+            scheduled,
+            reason: Reason::Preview,
+        };
+    }
     if paused().is_some() {
         return Decision {
             setting: ColorSetting::NEUTRAL,

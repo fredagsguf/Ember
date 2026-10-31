@@ -56,6 +56,52 @@ fn fixed_factor(start: f64, end: f64, now: f64, transition: f64) -> f64 {
     }
 }
 
+/// For solar mode: today's local times when the evening fade starts/ends and the morning
+/// fade starts/ends. `None` for a phase that doesn't happen (polar day/night).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SolarTimes {
+    pub evening: Option<(chrono::NaiveTime, chrono::NaiveTime)>,
+    pub morning: Option<(chrono::NaiveTime, chrono::NaiveTime)>,
+}
+
+pub fn solar_times(lat: f64, lon: f64, day: chrono::NaiveDate) -> SolarTimes {
+    use chrono::TimeZone;
+    let at = |m: u32| {
+        let t = day.and_hms_opt(m / 60, m % 60, 0).expect("valid time");
+        let local = Local
+            .from_local_datetime(&t)
+            .earliest()
+            .unwrap_or_else(|| Local.from_utc_datetime(&t));
+        (
+            t.time(),
+            crate::solar::elevation(local.with_timezone(&Utc), lat, lon),
+        )
+    };
+    let samples: Vec<_> = (0..1440).map(at).collect();
+    let cross = |threshold: f64, falling: bool| {
+        samples.windows(2).find_map(|w| {
+            let (a, b) = (w[0].1, w[1].1);
+            let hit = if falling {
+                a >= threshold && b < threshold
+            } else {
+                a < threshold && b >= threshold
+            };
+            hit.then_some(w[1].0)
+        })
+    };
+    let pair = |a: Option<chrono::NaiveTime>, b: Option<chrono::NaiveTime>| a.zip(b);
+    SolarTimes {
+        evening: pair(
+            cross(SOLAR_DAY_ELEVATION, true),
+            cross(SOLAR_NIGHT_ELEVATION, true),
+        ),
+        morning: pair(
+            cross(SOLAR_NIGHT_ELEVATION, false),
+            cross(SOLAR_DAY_ELEVATION, false),
+        ),
+    }
+}
+
 pub fn scheduled_setting(cfg: &Config, now: DateTime<Local>) -> ColorSetting {
     let c = &cfg.color;
     let day = ColorSetting {

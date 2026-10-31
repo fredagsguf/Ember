@@ -44,6 +44,20 @@ ember           # run in the terminal (same as `ember run`)
 
 Only one Ember (tray or CLI) can run at a time; a second one exits with "already running".
 
+## Settings window
+
+Open it from the tray (**Settings…**) or run `ember-tray --settings`.
+
+![Settings window](docs/settings.png)
+
+- **Sliders preview live**: while you drag a temperature or brightness slider, your screen shows that value; let go and it returns to what the schedule says. A running Ember holds the preview instead of fighting it.
+- **Changes save automatically** (no Save button) and Ember picks them up within one poll. Only the values you changed are rewritten in `config.toml`, so your comments stay.
+- **Schedule**: fixed times, or sunset/sunrise with a city picker (or exact coordinates) and today's fade times shown. No network access.
+- **Apps & games**: add a rule from a list of running apps, choose "active window" vs "running", and "turn Ember off" vs a custom colour (with its own previewing slider).
+- Edits made elsewhere (e.g. the tray's "Disable while … is focused") show up in an open settings window.
+
+On Linux the window needs OpenGL and `libxkbcommon-x11` (present on any normal desktop install).
+
 ## Tray menu
 
 | Item | What it does |
@@ -52,8 +66,9 @@ Only one Ember (tray or CLI) can run at a time; a second one exits with "already
 | Enabled | Untick to pause until you tick it again |
 | Disable for ▸ 15 min / 1 hour / 3 hours | Temporary pause |
 | Disable while "*app*" is focused | Adds/removes a rule for the last app you used (the taskbar/tray itself is ignored). Open the game, then click the tray icon and tick this — no config editing needed |
+| Settings… | Opens the settings window |
 | Start with Windows / Start at login | Registry `HKCU\…\Run` on Windows, `~/.config/autostart/ember-tray.desktop` on Linux |
-| Edit settings… | Opens `config.toml` (created if missing); changes apply on save |
+| Open config file | Opens `config.toml` in your editor (created if missing); changes apply on save |
 | Quit Ember | Restores neutral colours and exits |
 
 The icon is a glowing ember while your screen is tinted and a grey ring when it isn't. The tray app logs to `ember.log` in the data dir (Windows: `%LOCALAPPDATA%\ember\data\ember.log`, Linux: `~/.local/share/ember/ember.log`).
@@ -97,7 +112,7 @@ See [`config.example.toml`](config.example.toml) for every option. The config is
 ## Roadmap
 
 - [x] System tray app with on/off toggle, timed disable, and per-app rules from the menu
-- [ ] Settings window (sliders for temperatures, location picker) instead of editing TOML
+- [x] Settings window with live-preview sliders, location picker and rule editor
 - [ ] Wayland (wlr-gamma-control for sway/Hyprland; GNOME/KDE night-light integration)
 - [ ] macOS (CoreGraphics `CGSetDisplayTransferByTable`)
 - [ ] Global hotkey to toggle
@@ -112,7 +127,7 @@ cargo clippy --all-targets
 cargo check --target x86_64-pc-windows-gnu   # type-check the Windows backend from Linux
 ```
 
-Layout: `src/lib.rs` is the shared library; `src/main.rs` is the `ember` CLI and `src/bin/ember-tray/` the tray app (`windows.rs` uses `tray-icon`, `linux.rs` uses `ksni`). Shared pieces: `daemon.rs` (run loop, single-instance lock), `tray_model.rs` (menu state, actions, icon drawing), `autostart.rs`, `color.rs` (Kelvin → RGB → gamma ramp), `solar.rs` (sun elevation), `schedule.rs`, `rules.rs` (per-app matching), `engine.rs` (decision + process watching), `gamma/` (platform backends), `main.rs` (CLI + run loop).
+Layout: `src/lib.rs` is the shared library; `src/main.rs` is the `ember` CLI and `src/bin/ember-tray/` the tray app (`windows.rs` uses `tray-icon`, `linux.rs` uses `ksni`). Shared pieces: `daemon.rs` (run loop, single-instance lock), `tray_model.rs` (menu state, actions, icon drawing), `src/bin/ember-tray/settings.rs` (egui settings window), `autostart.rs`, `color.rs` (Kelvin → RGB → gamma ramp), `solar.rs` (sun elevation), `schedule.rs`, `rules.rs` (per-app matching), `engine.rs` (decision + process watching), `gamma/` (platform backends), `main.rs` (CLI + run loop).
 
 ## License
 

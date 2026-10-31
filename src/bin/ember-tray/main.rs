@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 #[cfg(target_os = "linux")]
 mod linux;
+mod settings;
 #[cfg(windows)]
 mod windows;
 
@@ -20,12 +21,15 @@ struct Cli {
     /// Don't touch the display, just log what would happen
     #[arg(long)]
     dry_run: bool,
+    /// Open the settings window instead of the tray
+    #[arg(long)]
+    settings: bool,
 }
 
-fn init_logging() {
+fn init_logging(file_name: &str) {
     let mut b = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
     b.format_timestamp_secs();
-    let path = ember::tray_model::log_path();
+    let path = ember::tray_model::log_path().with_file_name(file_name);
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -36,11 +40,18 @@ fn init_logging() {
 }
 
 fn main() {
-    init_logging();
     let cli = Cli::parse();
     let config_path = cli
         .config
         .unwrap_or_else(ember::config::default_config_path);
+    if cli.settings {
+        init_logging("settings.log");
+        if let Err(e) = settings::run(config_path) {
+            fatal(&format!("{e:#}"));
+        }
+        return;
+    }
+    init_logging("ember.log");
     let opts = daemon::Options {
         config_path: config_path.clone(),
         dry_run: cli.dry_run,

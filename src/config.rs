@@ -242,6 +242,203 @@ pub fn set_app_rule(path: &Path, app: &str, enable: bool) -> Result<()> {
     write_atomic(path, &out)
 }
 
+fn round_to(x: f64, places: i32) -> f64 {
+    let m = 10f64.powi(places);
+    (x * m).round() / m
+}
+
+/// Rewrite `text` so it parses to `new`, touching only the keys whose values changed.
+/// Comments, ordering and formatting of everything else are preserved.
+pub fn edit_text_apply(text: &str, new: &Config) -> Result<String> {
+    use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, Value};
+
+    new.validate()?;
+    let old = Config::parse(text).unwrap_or_default();
+    let mut doc: DocumentMut = text.parse().context("parsing config")?;
+
+    fn table<'a>(doc: &'a mut DocumentMut, name: &str) -> Result<&'a mut Table> {
+        if !doc.contains_key(name) {
+            doc.insert(name, Item::Table(Table::new()));
+        }
+        doc[name]
+            .as_table_mut()
+            .with_context(|| format!("[{name}] must be a table"))
+    }
+    /// Replace a value but keep its surrounding whitespace and trailing comment.
+    fn set(t: &mut Table, key: &str, v: impl Into<Value>) {
+        let mut v: Value = v.into();
+        match t.get_mut(key) {
+            Some(item) => {
+                if let Some(old) = item.as_value() {
+                    *v.decor_mut() = old.decor().clone();
+                }
+                *item = Item::Value(v);
+            }
+            None => {
+                t.insert(key, Item::Value(v));
+            }
+        }
+    }
+    fn set_opt(t: &mut Table, key: &str, v: Option<Value>) {
+        match v {
+            Some(v) => set(t, key, v),
+            None => {
+                t.remove(key);
+            }
+        }
+    }
+    let f2 = |x: f32| round_to(x as f64, 2);
+    let int = |x: u32| x as i64;
+    let when = |w: When| match w {
+        When::Focused => "focused",
+        When::Running => "running",
+    };
+    let mode = |m: ScheduleMode| match m {
+        ScheduleMode::Solar => "solar",
+        ScheduleMode::Fixed => "fixed",
+        ScheduleMode::AlwaysNight => "always_night",
+    };
+
+    macro_rules! sync {
+        ($t:expr, $key:literal, $old:expr, $new:expr, $conv:expr) => {
+            if $old != $new {
+                set($t, $key, $conv($new));
+            }
+        };
+    }
+
+    let (o, n) = (&old.general, &new.general);
+    if o != n {
+        let t = table(&mut doc, "general")?;
+        sync!(
+            t,
+            "poll_interval_secs",
+            o.poll_interval_secs,
+            n.poll_interval_secs,
+            |x: u64| x as i64
+        );
+        sync!(t, "fade_secs", o.fade_secs, n.fade_secs, |x: f64| round_to(
+            x, 2
+        ));
+    }
+    let (o, n) = (&old.color, &new.color);
+    if o != n {
+        let t = table(&mut doc, "color")?;
+        sync!(
+            t,
+            "day_temperature",
+            o.day_temperature,
+            n.day_temperature,
+            int
+        );
+        sync!(
+            t,
+            "night_temperature",
+            o.night_temperature,
+            n.night_temperature,
+            int
+        );
+        sync!(t, "day_brightness", o.day_brightness, n.day_brightness, f2);
+        sync!(
+            t,
+            "night_brightness",
+            o.night_brightness,
+            n.night_brightness,
+            f2
+        );
+    }
+    let (o, n) = (&old.schedule, &new.schedule);
+    if o != n {
+        let t = table(&mut doc, "schedule")?;
+        sync!(t, "mode", o.mode, n.mode, mode);
+        if o.latitude != n.latitude {
+            set_opt(t, "latitude", n.latitude.map(|x| round_to(x, 4).into()));
+        }
+        if o.longitude != n.longitude {
+            set_opt(t, "longitude", n.longitude.map(|x| round_to(x, 4).into()));
+        }
+        sync!(
+            t,
+            "night_start",
+            o.night_start.as_str(),
+            n.night_start.as_str(),
+            |x: &str| x.to_string()
+        );
+        sync!(
+            t,
+            "night_end",
+            o.night_end.as_str(),
+            n.night_end.as_str(),
+            |x: &str| x.to_string()
+        );
+        sync!(
+            t,
+            "transition_minutes",
+            o.transition_minutes,
+            n.transition_minutes,
+            int
+        );
+    }
+
+    if old.rules != new.rules {
+        if !doc.contains_key("rules") {
+            doc.insert("rules", Item::ArrayOfTables(ArrayOfTables::new()));
+        }
+        let arr = doc["rules"]
+            .as_array_of_tables_mut()
+            .context("`rules` must be written as [[rules]] tables")?;
+        while arr.len() > new.rules.len() {
+            arr.remove(arr.len() - 1);
+        }
+        for (i, r) in new.rules.iter().enumerate() {
+            if i >= arr.len() {
+                arr.push(Table::new());
+            }
+            let prev = old.rules.get(i);
+            if prev == Some(r) {
+                continue;
+            }
+            let t = arr.get_mut(i).expect("index checked above");
+            if prev.map(|p| &p.name) != Some(&r.name) {
+                set_opt(t, "name", r.name.clone().map(Value::from));
+            }
+            if prev.map(|p| &p.processes) != Some(&r.processes) {
+                set(
+                    t,
+                    "processes",
+                    r.processes.iter().map(String::as_str).collect::<Array>(),
+                );
+            }
+            if prev.map(|p| p.when) != Some(r.when) {
+                set(t, "when", when(r.when));
+            }
+            if prev.map(|p| p.temperature) != Some(r.temperature) {
+                set_opt(t, "temperature", r.temperature.map(|x| int(x).into()));
+            }
+            if prev.map(|p| p.brightness) != Some(r.brightness) {
+                set_opt(t, "brightness", r.brightness.map(|x| f2(x).into()));
+            }
+        }
+    }
+
+    let out = doc.to_string();
+    let check = Config::parse(&out).context("edited config would be invalid")?;
+    if &check != new {
+        bail!("internal error: saved config does not round-trip");
+    }
+    Ok(out)
+}
+
+/// Save `cfg` to `path`, preserving the existing file's comments where possible.
+pub fn save(path: &Path, cfg: &Config) -> Result<()> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DEFAULT_CONFIG.to_string(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    write_atomic(path, &edit_text_apply(&text, cfg)?)
+}
+
 pub fn ensure_exists(path: &Path) -> Result<()> {
     if !path.exists() {
         write_atomic(path, DEFAULT_CONFIG)?;
@@ -336,6 +533,57 @@ temperature = 5000
         let out = edit_text_set_app_rule(DEFAULT_CONFIG, "mpv", true).unwrap();
         let cfg = Config::parse(&out).unwrap();
         assert!(cfg.has_disable_rule("mpv") && cfg.has_disable_rule("cs2"));
+    }
+
+    #[test]
+    fn apply_round_trips_and_keeps_comments() {
+        let mut cfg = Config::parse(DEFAULT_CONFIG).unwrap();
+        cfg.color.night_temperature = 2700;
+        cfg.color.night_brightness = 0.8;
+        cfg.schedule.mode = ScheduleMode::Solar;
+        cfg.schedule.latitude = Some(59.91);
+        cfg.schedule.longitude = Some(10.75);
+        cfg.general.fade_secs = 1.25;
+        cfg.rules[0].temperature = Some(5000);
+        cfg.rules.push(Rule {
+            name: Some("Valorant".into()),
+            processes: vec!["valorant".into(), "valorant-win64-shipping".into()],
+            when: When::Running,
+            temperature: None,
+            brightness: Some(0.9),
+        });
+        let out = edit_text_apply(DEFAULT_CONFIG, &cfg).unwrap();
+        assert_eq!(Config::parse(&out).unwrap(), cfg);
+        // untouched comments survive, including the inline one on a changed value
+        assert!(out.contains("# Ember configuration."));
+        assert!(out.contains("night_temperature = 2700 # lower = warmer/redder"));
+        assert!(out.contains("# \"solar\"        – follow sunset/sunrise"));
+
+        // and removing things works too
+        cfg.rules.clear();
+        cfg.schedule.latitude = None;
+        cfg.schedule.longitude = None;
+        cfg.schedule.mode = ScheduleMode::AlwaysNight;
+        let out2 = edit_text_apply(&out, &cfg).unwrap();
+        assert_eq!(Config::parse(&out2).unwrap(), cfg);
+        assert!(!out2.contains("\n[[rules]]"));
+    }
+
+    #[test]
+    fn apply_without_changes_is_identity() {
+        let cfg = Config::parse(DEFAULT_CONFIG).unwrap();
+        assert_eq!(
+            edit_text_apply(DEFAULT_CONFIG, &cfg).unwrap(),
+            DEFAULT_CONFIG
+        );
+    }
+
+    #[test]
+    fn apply_to_empty_file() {
+        let mut cfg = Config::default();
+        cfg.color.night_temperature = 3000;
+        let out = edit_text_apply("", &cfg).unwrap();
+        assert_eq!(Config::parse(&out).unwrap(), cfg);
     }
 
     #[test]

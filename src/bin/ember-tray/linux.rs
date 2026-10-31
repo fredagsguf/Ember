@@ -115,6 +115,12 @@ impl ksni::Tray for EmberTray {
         });
         items.extend([
             MenuItem::Separator,
+            StandardItem {
+                label: "Settings…".into(),
+                activate: Box::new(|t: &mut Self| t.act(Action::OpenSettings)),
+                ..Default::default()
+            }
+            .into(),
             CheckmarkItem {
                 label: "Start at login".into(),
                 checked: v.autostart,
@@ -123,7 +129,7 @@ impl ksni::Tray for EmberTray {
             }
             .into(),
             StandardItem {
-                label: "Edit settings…".into(),
+                label: "Open config file".into(),
                 activate: Box::new(|t: &mut Self| t.act(Action::OpenConfig)),
                 ..Default::default()
             }

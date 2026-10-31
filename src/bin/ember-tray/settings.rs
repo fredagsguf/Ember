@@ -1,0 +1,711 @@
+//! The settings window (`ember-tray --settings`). Runs as its own process, edits config.toml,
+//! and previews slider values on screen while you drag them.
+
+use anyhow::{Result, anyhow};
+use eframe::egui::{self, Color32, RichText, SliderClamping, Ui};
+use ember::color::{self, ColorSetting};
+use ember::config::{self, Config, Rule, ScheduleMode, When};
+use ember::{engine, gamma, schedule, tray_model};
+use std::fs::File;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
+
+/// Wait this long after the last edit before writing the file.
+const SAVE_DEBOUNCE: Duration = Duration::from_millis(400);
+const PREVIEW_REFRESH: Duration = Duration::from_millis(250);
+
+pub fn run(config_path: PathBuf) -> Result<()> {
+    // Only one settings window at a time.
+    let lock_path = config::state_dir().join("settings.lock");
+    std::fs::create_dir_all(config::state_dir())?;
+    let lock = File::create(&lock_path)?;
+    if lock.try_lock().is_err() {
+        log::info!("settings window already open");
+        return Ok(());
+    }
+
+    let icon = egui::IconData {
+        rgba: tray_model::icon_rgba(64, true),
+        width: 64,
+        height: 64,
+    };
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("Ember settings")
+            .with_inner_size([560.0, 720.0])
+            .with_min_inner_size([420.0, 400.0])
+            .with_icon(icon),
+        ..Default::default()
+    };
+    let app = SettingsApp::new(config_path);
+    // winit panics (rather than erroring) when e.g. libxkbcommon-x11 is missing; report it cleanly.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        eframe::run_native("Ember settings", options, Box::new(|_cc| Ok(Box::new(app))))
+    }));
+    match result {
+        Ok(r) => r.map_err(|e| anyhow!("could not open the settings window: {e}"))?,
+        Err(p) => {
+            let msg = p
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| p.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown error");
+            engine::clear_preview();
+            return Err(anyhow!("could not open the settings window: {msg}"));
+        }
+    }
+    drop(lock);
+    Ok(())
+}
+
+struct SettingsApp {
+    path: PathBuf,
+    cfg: Config,
+    /// What is on disk (as far as we know).
+    saved: Config,
+    file_mtime: Option<SystemTime>,
+    last_edit: Option<Instant>,
+    message: Option<(String, bool)>, // (text, is_error)
+    /// Comma-separated process lists, one per rule (kept separately so typing "a, " works).
+    proc_text: Vec<String>,
+    backend: Option<Box<dyn gamma::Backend>>,
+    previewing: Option<ColorSetting>,
+    last_preview_write: Option<Instant>,
+    running_apps: Vec<String>,
+    new_app: String,
+}
+
+/// Offline shortcut for setting a location. Sorted by name.
+const CITIES: &[(&str, f64, f64)] = &[
+    ("Amsterdam", 52.37, 4.90),
+    ("Athens", 37.98, 23.73),
+    ("Auckland", -36.85, 174.76),
+    ("Bangkok", 13.76, 100.50),
+    ("Beijing", 39.90, 116.40),
+    ("Berlin", 52.52, 13.40),
+    ("Buenos Aires", -34.60, -58.38),
+    ("Cairo", 30.04, 31.24),
+    ("Chicago", 41.88, -87.63),
+    ("Copenhagen", 55.68, 12.57),
+    ("Delhi", 28.61, 77.21),
+    ("Denver", 39.74, -104.99),
+    ("Dubai", 25.20, 55.27),
+    ("Helsinki", 60.17, 24.94),
+    ("Istanbul", 41.01, 28.98),
+    ("Jakarta", -6.21, 106.85),
+    ("Johannesburg", -26.20, 28.05),
+    ("Kyiv", 50.45, 30.52),
+    ("Lagos", 6.52, 3.38),
+    ("London", 51.51, -0.13),
+    ("Los Angeles", 34.05, -118.24),
+    ("Madrid", 40.42, -3.70),
+    ("Mexico City", 19.43, -99.13),
+    ("Moscow", 55.76, 37.62),
+    ("Mumbai", 19.08, 72.88),
+    ("New York", 40.71, -74.01),
+    ("Oslo", 59.91, 10.75),
+    ("Paris", 48.86, 2.35),
+    ("Reykjavik", 64.15, -21.94),
+    ("Rome", 41.90, 12.50),
+    ("San Francisco", 37.77, -122.42),
+    ("São Paulo", -23.55, -46.63),
+    ("Seattle", 47.61, -122.33),
+    ("Seoul", 37.57, 126.98),
+    ("Singapore", 1.35, 103.82),
+    ("Stockholm", 59.33, 18.07),
+    ("Sydney", -33.87, 151.21),
+    ("Tokyo", 35.68, 139.69),
+    ("Toronto", 43.65, -79.38),
+    ("Vancouver", 49.28, -123.12),
+    ("Warsaw", 52.23, 21.01),
+];
+
+fn mtime(p: &Path) -> Option<SystemTime> {
+    std::fs::metadata(p).and_then(|m| m.modified()).ok()
+}
+
+impl SettingsApp {
+    fn new(path: PathBuf) -> Self {
+        let (cfg, message) = match path.exists().then(|| Config::load(&path)) {
+            None => (
+                Config::parse(config::DEFAULT_CONFIG).unwrap_or_default(),
+                None,
+            ),
+            Some(Ok(c)) => (c, None),
+            Some(Err(e)) => (
+                Config::default(),
+                Some((
+                    format!(
+                        "Your config file has an error, so changes won't be saved until it's fixed: {e:#}"
+                    ),
+                    true,
+                )),
+            ),
+        };
+        let backend = match gamma::open(false) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                log::warn!("live preview unavailable: {e:#}");
+                None
+            }
+        };
+        let mut me = SettingsApp {
+            file_mtime: mtime(&path),
+            path,
+            saved: cfg.clone(),
+            proc_text: Vec::new(),
+            cfg,
+            last_edit: None,
+            message,
+            backend,
+            previewing: None,
+            last_preview_write: None,
+            running_apps: Vec::new(),
+            new_app: String::new(),
+        };
+        me.sync_proc_text();
+        me.refresh_running_apps();
+        me
+    }
+
+    fn sync_proc_text(&mut self) {
+        self.proc_text = self
+            .cfg
+            .rules
+            .iter()
+            .map(|r| r.processes.join(", "))
+            .collect();
+    }
+
+    fn refresh_running_apps(&mut self) {
+        if let Ok(mut w) = engine::ProcessWatcher::new() {
+            self.running_apps = w
+                .all_names()
+                .into_iter()
+                .filter(|n| {
+                    n.len() > 1 && !n.contains([':', '/', ' ']) && !n.starts_with("kworker")
+                })
+                .collect();
+        }
+    }
+
+    /// Pick up edits made elsewhere (e.g. "Disable while … is focused" in the tray).
+    fn reload_if_changed_on_disk(&mut self) {
+        let m = mtime(&self.path);
+        if m == self.file_mtime || self.last_edit.is_some() {
+            return;
+        }
+        self.file_mtime = m;
+        if let Ok(c) = Config::load(&self.path) {
+            self.cfg = c.clone();
+            self.saved = c;
+            self.sync_proc_text();
+        }
+    }
+
+    fn save_if_due(&mut self) {
+        let Some(t) = self.last_edit else { return };
+        if t.elapsed() < SAVE_DEBOUNCE || self.previewing.is_some() {
+            return;
+        }
+        self.last_edit = None;
+        // A rule that's still being filled in (no process names yet) shouldn't block saving
+        // everything else; it's kept in the window and saved once it has a process.
+        let mut to_save = self.cfg.clone();
+        to_save.rules.retain(|r| !r.processes.is_empty());
+        if to_save == self.saved {
+            return;
+        }
+        if let Err(e) = to_save.validate() {
+            self.message = Some((format!("Not saved: {e:#}"), true));
+            return;
+        }
+        match config::save(&self.path, &to_save) {
+            Ok(()) => {
+                self.saved = to_save;
+                self.file_mtime = mtime(&self.path);
+                self.message = Some(("Saved".into(), false));
+            }
+            Err(e) => self.message = Some((format!("Not saved: {e:#}"), true)),
+        }
+    }
+
+    /// Show `s` on screen right now, and tell a running Ember daemon to hold it.
+    fn preview(&mut self, s: ColorSetting) {
+        let due = self
+            .last_preview_write
+            .is_none_or(|t| t.elapsed() >= PREVIEW_REFRESH);
+        if self.previewing != Some(s) || due {
+            let _ = engine::set_preview(s);
+            self.last_preview_write = Some(Instant::now());
+        }
+        if self.previewing != Some(s)
+            && let Some(b) = self.backend.as_mut()
+        {
+            let _ = b.apply(s);
+        }
+        self.previewing = Some(s);
+    }
+
+    fn end_preview(&mut self) {
+        if self.previewing.take().is_none() {
+            return;
+        }
+        engine::clear_preview();
+        // Snap back to what the schedule says; a running daemon will take over from here.
+        let target = if engine::paused().is_some() {
+            ColorSetting::NEUTRAL
+        } else {
+            schedule::scheduled_setting(&self.cfg, chrono::Local::now())
+        };
+        if let Some(b) = self.backend.as_mut() {
+            let _ = b.apply(target);
+            let _ = b.sync();
+        }
+    }
+}
+
+/// A small swatch showing how white looks at this temperature/brightness.
+fn swatch(ui: &mut Ui, s: ColorSetting) {
+    let [r, g, b] = color::temperature_to_rgb(s.temperature);
+    let k = s.brightness.clamp(0.1, 1.0) as f64 * 255.0;
+    let c = Color32::from_rgb((r * k) as u8, (g * k) as u8, (b * k) as u8);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 18.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 4.0, c);
+}
+
+/// Temperature slider. Returns the new value if the user is dragging (for live preview).
+fn kelvin_slider(
+    ui: &mut Ui,
+    value: &mut u32,
+    range: std::ops::RangeInclusive<u32>,
+) -> (bool, bool) {
+    let r = ui.add(
+        egui::Slider::new(value, range)
+            .step_by(50.0)
+            .suffix(" K")
+            .clamping(SliderClamping::Edits),
+    );
+    (r.changed(), r.dragged() || r.has_focus())
+}
+
+fn percent_slider(ui: &mut Ui, value: &mut f32) -> (bool, bool) {
+    let mut pct = (*value * 100.0).round() as u32;
+    let r = ui.add(egui::Slider::new(&mut pct, 10..=100).suffix(" %"));
+    if r.changed() {
+        *value = pct as f32 / 100.0;
+    }
+    (r.changed(), r.dragged() || r.has_focus())
+}
+
+fn time_edit(ui: &mut Ui, id: &str, hhmm: &mut String) -> bool {
+    let t = config::parse_hhmm(hhmm).unwrap_or_default();
+    use chrono::Timelike;
+    let (mut h, mut m) = (t.hour(), t.minute());
+    let mut changed = false;
+    ui.push_id(id, |ui| {
+        changed |= ui
+            .add(egui::DragValue::new(&mut h).range(0..=23).speed(0.1))
+            .changed();
+        ui.label(":");
+        changed |= ui
+            .add(
+                egui::DragValue::new(&mut m)
+                    .range(0..=59)
+                    .speed(0.2)
+                    .custom_formatter(|v, _| format!("{v:02}")),
+            )
+            .changed();
+    });
+    if changed {
+        *hhmm = format!("{h:02}:{m:02}");
+    }
+    changed
+}
+
+fn section(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
+    ui.add_space(10.0);
+    ui.label(RichText::new(title).strong().size(16.0));
+    ui.add_space(4.0);
+    egui::Frame::group(ui.style())
+        .inner_margin(10.0)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add(ui)
+        });
+}
+
+impl eframe::App for SettingsApp {
+    fn ui(&mut self, root: &mut Ui, _frame: &mut eframe::Frame) {
+        let ctx = root.ctx().clone();
+        self.reload_if_changed_on_disk();
+        let before = self.cfg.clone();
+        let mut preview: Option<ColorSetting> = None;
+
+        egui::CentralPanel::default().show(root, |ui| {
+            ui.spacing_mut().slider_width = (ui.available_width() - 260.0).clamp(120.0, 300.0);
+            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                // ── Now ────────────────────────────────────────────────
+                let now = schedule::scheduled_setting(&self.cfg, chrono::Local::now());
+                ui.horizontal(|ui| {
+                    swatch(ui, now);
+                    let paused = if engine::paused().is_some() { " — paused" } else { "" };
+                    ui.label(
+                        RichText::new(format!("Right now: {} K, {:.0} %{paused}", now.temperature, now.brightness * 100.0))
+                            .size(15.0),
+                    );
+                });
+                if self.backend.is_some() {
+                    ui.weak("Drag a slider to preview it on screen.");
+                } else {
+                    ui.weak("Live preview isn't available on this display server.");
+                }
+
+                // ── Colour ─────────────────────────────────────────────
+                section(ui, "Colour", |ui| {
+                    egui::Grid::new("colour").num_columns(3).spacing([12.0, 10.0]).show(ui, |ui| {
+                        let c = &mut self.cfg.color;
+                        ui.label("Night temperature");
+                        let (_, d) = kelvin_slider(ui, &mut c.night_temperature, 1200..=6500);
+                        if d {
+                            preview = Some(ColorSetting { temperature: c.night_temperature, brightness: c.night_brightness });
+                        }
+                        swatch(ui, ColorSetting { temperature: c.night_temperature, brightness: c.night_brightness });
+                        ui.end_row();
+
+                        ui.label("Night brightness");
+                        let (_, d) = percent_slider(ui, &mut c.night_brightness);
+                        if d {
+                            preview = Some(ColorSetting { temperature: c.night_temperature, brightness: c.night_brightness });
+                        }
+                        ui.label("");
+                        ui.end_row();
+
+                        ui.label("Day temperature");
+                        let (_, d) = kelvin_slider(ui, &mut c.day_temperature, 3000..=6500);
+                        if d {
+                            preview = Some(ColorSetting { temperature: c.day_temperature, brightness: c.day_brightness });
+                        }
+                        swatch(ui, ColorSetting { temperature: c.day_temperature, brightness: c.day_brightness });
+                        ui.end_row();
+
+                        ui.label("Day brightness");
+                        let (_, d) = percent_slider(ui, &mut c.day_brightness);
+                        if d {
+                            preview = Some(ColorSetting { temperature: c.day_temperature, brightness: c.day_brightness });
+                        }
+                        ui.label("");
+                        ui.end_row();
+                    });
+                    ui.weak("6500 K is neutral. Lower is warmer. f.lux's default night setting is 3400 K.");
+                });
+
+                // ── Schedule ───────────────────────────────────────────
+                section(ui, "Schedule", |ui| {
+                    let s = &mut self.cfg.schedule;
+                    ui.horizontal(|ui| {
+                        ui.radio_value(&mut s.mode, ScheduleMode::Fixed, "Fixed times");
+                        ui.radio_value(&mut s.mode, ScheduleMode::Solar, "Sunset to sunrise");
+                        ui.radio_value(&mut s.mode, ScheduleMode::AlwaysNight, "Always night");
+                    });
+                    ui.add_space(6.0);
+                    match s.mode {
+                        ScheduleMode::Fixed => {
+                            egui::Grid::new("fixed").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                                ui.label("Night starts");
+                                ui.horizontal(|ui| time_edit(ui, "start", &mut s.night_start));
+                                ui.end_row();
+                                ui.label("Night ends");
+                                ui.horizontal(|ui| time_edit(ui, "end", &mut s.night_end));
+                                ui.end_row();
+                                ui.label("Fade duration");
+                                ui.add(egui::Slider::new(&mut s.transition_minutes, 0..=180).suffix(" min"));
+                                ui.end_row();
+                            });
+                        }
+                        ScheduleMode::Solar => {
+                            if s.latitude.is_none() || s.longitude.is_none() {
+                                s.latitude.get_or_insert(0.0);
+                                s.longitude.get_or_insert(0.0);
+                            }
+                            egui::ComboBox::from_id_salt("city")
+                                .selected_text("Pick a nearby city…")
+                                .width(220.0)
+                                .show_ui(ui, |ui| {
+                                    for &(name, lat, lon) in CITIES {
+                                        if ui.selectable_label(false, name).clicked() {
+                                            s.latitude = Some(lat);
+                                            s.longitude = Some(lon);
+                                        }
+                                    }
+                                });
+                            ui.add_space(4.0);
+                            egui::Grid::new("solar").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                                ui.label("Latitude");
+                                ui.add(
+                                    egui::DragValue::new(s.latitude.as_mut().expect("set above"))
+                                        .range(-90.0..=90.0)
+                                        .speed(0.05)
+                                        .fixed_decimals(2)
+                                        .suffix("°"),
+                                );
+                                ui.end_row();
+                                ui.label("Longitude");
+                                ui.add(
+                                    egui::DragValue::new(s.longitude.as_mut().expect("set above"))
+                                        .range(-180.0..=180.0)
+                                        .speed(0.05)
+                                        .fixed_decimals(2)
+                                        .suffix("°"),
+                                );
+                                ui.end_row();
+                            });
+                            ui.weak("Pick a city or enter coordinates (north and east are positive). Ember never uses the network.");
+                            let (lat, lon) = (s.latitude.unwrap_or(0.0), s.longitude.unwrap_or(0.0));
+                            if lat == 0.0 && lon == 0.0 {
+                                ui.colored_label(Color32::from_rgb(220, 140, 40), "Set your location to get correct sunset times.");
+                            }
+                            let t = schedule::solar_times(lat, lon, chrono::Local::now().date_naive());
+                            let fmt = |p: Option<(chrono::NaiveTime, chrono::NaiveTime)>| {
+                                p.map(|(a, b)| format!("{} to {}", a.format("%H:%M"), b.format("%H:%M")))
+                                    .unwrap_or_else(|| "none today".into())
+                            };
+                            ui.label(format!("Today: evening fade {}, morning fade {}", fmt(t.evening), fmt(t.morning)));
+                        }
+                        ScheduleMode::AlwaysNight => {
+                            ui.weak("The night settings are used all the time.");
+                        }
+                    }
+                });
+
+                // ── Apps & games ───────────────────────────────────────
+                section(ui, "Apps & games", |ui| {
+                    ui.weak("Ember turns off (or uses a different colour) while these apps are in use. First match wins.");
+                    ui.add_space(6.0);
+                    let mut remove = None;
+                    for (i, rule) in self.cfg.rules.iter_mut().enumerate() {
+                        ui.push_id(i, |ui| {
+                            egui::Frame::new()
+                                .fill(ui.visuals().faint_bg_color)
+                                .corner_radius(6.0)
+                                .inner_margin(8.0)
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    rule_editor(ui, rule, &mut self.proc_text[i], &mut preview, &mut remove, i);
+                                });
+                        });
+                        ui.add_space(4.0);
+                    }
+                    if let Some(i) = remove {
+                        self.cfg.rules.remove(i);
+                        self.proc_text.remove(i);
+                    }
+
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("running")
+                            .width(220.0)
+                            .selected_text(if self.new_app.is_empty() { "Pick a running app…" } else { &self.new_app })
+                            .show_ui(ui, |ui| {
+                                for n in &self.running_apps {
+                                    ui.selectable_value(&mut self.new_app, n.clone(), n);
+                                }
+                            });
+                        if ui.button("Refresh").on_hover_text("Refresh the list of running apps").clicked() {
+                            self.refresh_running_apps();
+                        }
+                        let label = if self.new_app.is_empty() { "Add empty rule" } else { "Add rule" };
+                        if ui.button(label).clicked() {
+                            let app = std::mem::take(&mut self.new_app);
+                            self.cfg.rules.push(Rule {
+                                name: (!app.is_empty()).then(|| app.clone()),
+                                processes: if app.is_empty() { vec![] } else { vec![app.clone()] },
+                                when: When::Focused,
+                                temperature: None,
+                                brightness: None,
+                            });
+                            self.proc_text.push(app);
+                        }
+                    });
+                });
+
+                // ── Advanced ───────────────────────────────────────────
+                section(ui, "Advanced", |ui| {
+                    egui::Grid::new("adv").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                        let g = &mut self.cfg.general;
+                        ui.label("Fade when an app rule switches");
+                        ui.add(egui::Slider::new(&mut g.fade_secs, 0.0..=3.0).suffix(" s").fixed_decimals(1));
+                        ui.end_row();
+                        ui.label("Check apps every");
+                        ui.add(egui::Slider::new(&mut g.poll_interval_secs, 1..=10).suffix(" s"));
+                        ui.end_row();
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Open config file").clicked() {
+                            let _ = config::ensure_exists(&self.path);
+                            let _ = tray_model::open_in_default_app(&self.path);
+                        }
+                        if ui.button("Reset to defaults").clicked() {
+                            self.cfg = Config::parse(config::DEFAULT_CONFIG).unwrap_or_default();
+                            self.sync_proc_text();
+                        }
+                    });
+                    ui.weak(self.path.display().to_string());
+                });
+
+                ui.add_space(8.0);
+                if let Some((msg, err)) = &self.message {
+                    let color = if *err { Color32::from_rgb(220, 70, 60) } else { ui.visuals().weak_text_color() };
+                    ui.colored_label(color, msg);
+                }
+            });
+        });
+
+        // Process lists are edited as text; turn them back into the config.
+        for (rule, text) in self.cfg.rules.iter_mut().zip(&self.proc_text) {
+            let parsed: Vec<String> = text
+                .split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect();
+            if rule.processes != parsed {
+                rule.processes = parsed;
+            }
+        }
+
+        if self.cfg != before {
+            self.last_edit = Some(Instant::now());
+            self.message = None;
+        }
+
+        match preview {
+            Some(s) => self.preview(s),
+            None => self.end_preview(),
+        }
+        self.save_if_due();
+
+        // Keep the "Right now" line and the debounce/preview timers ticking.
+        let next = if self.previewing.is_some() || self.last_edit.is_some() {
+            100
+        } else {
+            1000
+        };
+        ctx.request_repaint_after(Duration::from_millis(next));
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.end_preview();
+        self.last_edit = Some(Instant::now() - SAVE_DEBOUNCE);
+        self.save_if_due();
+    }
+}
+
+fn rule_editor(
+    ui: &mut Ui,
+    rule: &mut Rule,
+    procs: &mut String,
+    preview: &mut Option<ColorSetting>,
+    remove: &mut Option<usize>,
+    i: usize,
+) {
+    ui.horizontal(|ui| {
+        let mut name = rule.name.clone().unwrap_or_default();
+        let r = ui.add(
+            egui::TextEdit::singleline(&mut name)
+                .hint_text("Name")
+                .desired_width(180.0),
+        );
+        if r.changed() {
+            rule.name = (!name.trim().is_empty()).then_some(name);
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("Remove").clicked() {
+                *remove = Some(i);
+            }
+        });
+    });
+    egui::Grid::new("rule")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Processes");
+            ui.add(
+                egui::TextEdit::singleline(procs)
+                    .hint_text("e.g. cs2, valorant")
+                    .desired_width(f32::INFINITY),
+            )
+            .on_hover_text("Comma-separated. Case doesn't matter and \".exe\" is optional.");
+            ui.end_row();
+
+            ui.label("Applies");
+            egui::ComboBox::from_id_salt("when")
+                .selected_text(match rule.when {
+                    When::Focused => "while it's the active window",
+                    When::Running => "while it's running",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut rule.when,
+                        When::Focused,
+                        "while it's the active window",
+                    );
+                    ui.selectable_value(&mut rule.when, When::Running, "while it's running");
+                });
+            ui.end_row();
+
+            ui.label("Action");
+            let disables = rule.temperature.is_none() && rule.brightness.is_none();
+            egui::ComboBox::from_id_salt("action")
+                .selected_text(if disables {
+                    "Turn Ember off"
+                } else {
+                    "Use a custom colour"
+                })
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(disables, "Turn Ember off").clicked() {
+                        rule.temperature = None;
+                        rule.brightness = None;
+                    }
+                    if ui
+                        .selectable_label(!disables, "Use a custom colour")
+                        .clicked()
+                        && disables
+                    {
+                        rule.temperature = Some(5000);
+                    }
+                });
+            ui.end_row();
+
+            if rule.temperature.is_some() || rule.brightness.is_some() {
+                let mut k = rule.temperature.unwrap_or(color::NEUTRAL_K);
+                let b = rule.brightness.unwrap_or(1.0);
+                ui.label("Temperature");
+                ui.horizontal(|ui| {
+                    let (changed, dragging) = kelvin_slider(ui, &mut k, 1200..=6500);
+                    if changed {
+                        rule.temperature = Some(k);
+                    }
+                    if dragging {
+                        *preview = Some(ColorSetting {
+                            temperature: k,
+                            brightness: b,
+                        });
+                    }
+                    swatch(
+                        ui,
+                        ColorSetting {
+                            temperature: k,
+                            brightness: b,
+                        },
+                    );
+                });
+                ui.end_row();
+            }
+        });
+    if rule.processes.is_empty() {
+        ui.colored_label(
+            Color32::from_rgb(220, 140, 40),
+            "Add at least one process name.",
+        );
+    }
+}

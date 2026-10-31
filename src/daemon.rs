@@ -188,7 +188,11 @@ fn run_locked(opts: &Options, rx: Receiver<Msg>, state: &Mutex<State>) -> Result
         }
 
         // Fade only on a state change (rule on/off, pause); schedule changes are already gradual.
-        let state_changed = last_reason.is_some() && last_reason.as_ref() != Some(&d.reason);
+        // Previews must track the slider exactly, so never fade into or out of them.
+        let state_changed = last_reason.is_some()
+            && last_reason.as_ref() != Some(&d.reason)
+            && d.reason != Reason::Preview
+            && last_reason != Some(Reason::Preview);
         let mut stop = false;
         match current {
             Some(from) if state_changed && cfg.general.fade_secs > 0.0 => {
@@ -220,7 +224,13 @@ fn run_locked(opts: &Options, rx: Receiver<Msg>, state: &Mutex<State>) -> Result
         if stop {
             break;
         }
-        match rx.recv_timeout(Duration::from_secs(cfg.general.poll_interval_secs.max(1))) {
+        // Poll quickly while previewing so we notice the end of the drag promptly.
+        let wait = if is_preview(&last_reason) {
+            Duration::from_millis(200)
+        } else {
+            Duration::from_secs(cfg.general.poll_interval_secs.max(1))
+        };
+        match rx.recv_timeout(wait) {
             Ok(Msg::Wake) | Err(RecvTimeoutError::Timeout) => {}
             Ok(Msg::Stop) | Err(RecvTimeoutError::Disconnected) => break,
         }
@@ -228,6 +238,10 @@ fn run_locked(opts: &Options, rx: Receiver<Msg>, state: &Mutex<State>) -> Result
 
     log::info!("restoring neutral colours");
     backend.restore()
+}
+
+fn is_preview(r: &Option<Reason>) -> bool {
+    matches!(r, Some(Reason::Preview))
 }
 
 fn apply(backend: &mut dyn Backend, s: ColorSetting) {

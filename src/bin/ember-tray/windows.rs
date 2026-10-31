@@ -44,7 +44,8 @@ pub fn run(daemon: Handle, config_path: PathBuf) -> Result<()> {
     }
     let app = CheckMenuItem::new("Disable for current app", false, false, None);
     let autostart = CheckMenuItem::new("Start with Windows", true, false, None);
-    let open_cfg = MenuItem::new("Edit settings…", true, None);
+    let settings = MenuItem::new("Settings…", true, None);
+    let open_cfg = MenuItem::new("Open config file", true, None);
     let quit = MenuItem::new("Quit Ember", true, None);
 
     let menu = Menu::new();
@@ -55,6 +56,7 @@ pub fn run(daemon: Handle, config_path: PathBuf) -> Result<()> {
         &disable_sub,
         &app,
         &PredefinedMenuItem::separator(),
+        &settings,
         &autostart,
         &open_cfg,
         &PredefinedMenuItem::separator(),
@@ -75,6 +77,8 @@ pub fn run(daemon: Handle, config_path: PathBuf) -> Result<()> {
             Some(Action::ToggleAppRule)
         } else if id == autostart.id() {
             Some(Action::ToggleAutostart)
+        } else if id == settings.id() {
+            Some(Action::OpenSettings)
         } else if id == open_cfg.id() {
             Some(Action::OpenConfig)
         } else if id == quit.id() {

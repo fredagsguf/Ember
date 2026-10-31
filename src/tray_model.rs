@@ -14,6 +14,7 @@ pub enum Action {
     /// Add/remove a disable rule for the most recently used app.
     ToggleAppRule,
     ToggleAutostart,
+    OpenSettings,
     OpenConfig,
     Quit,
 }
@@ -62,6 +63,7 @@ pub fn view(state: &State) -> View {
                 Reason::Schedule => format!("{k}K"),
                 Reason::Rule(name) if k == crate::color::NEUTRAL_K => format!("Off while {name}"),
                 Reason::Rule(name) => format!("{k}K for {name}"),
+                Reason::Preview => format!("Previewing {k}K"),
                 Reason::Paused => match engine::paused() {
                     Some(Some(until)) => format!("Paused for {} more min", minutes_until(until)),
                     _ => "Paused".into(),
@@ -125,6 +127,14 @@ pub fn perform(action: Action, daemon: &Handle, config_path: &Path) -> Result<bo
             }
         }
         Action::ToggleAutostart => crate::autostart::set_enabled(!crate::autostart::is_enabled())?,
+        Action::OpenSettings => {
+            let exe = std::env::current_exe()?;
+            std::process::Command::new(exe)
+                .arg("--settings")
+                .arg("--config")
+                .arg(config_path)
+                .spawn()?;
+        }
         Action::OpenConfig => {
             crate::config::ensure_exists(config_path)?;
             open_in_default_app(config_path)?;
