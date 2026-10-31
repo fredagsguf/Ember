@@ -1,0 +1,126 @@
+name: Release
+
+# Push a tag like v0.2.0 (matching the version in Cargo.toml) to build the Windows .exe files
+# and publish them as a GitHub Release. Running it manually builds the zip as a workflow
+# artifact without creating a release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      TARGET: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Work out version
+        id: version
+        shell: pwsh
+        run: |
+          $crate = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
+            Where-Object name -eq 'ember'
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $tag = "${{ github.ref_name }}"
+            if ($tag -ne "v$($crate.version)" -and -not $tag.StartsWith("v$($crate.version)-")) {
+              throw "Tag $tag does not match Cargo.toml version $($crate.version). Bump Cargo.toml first."
+            }
+            $label = $tag
+          } else {
+            $label = "v$($crate.version)-dev.$("${{ github.sha }}".Substring(0, 7))"
+          }
+          "label=$label" >> $env:GITHUB_OUTPUT
+          "name=ember-$label-windows-x64" >> $env:GITHUB_OUTPUT
+
+      - name: Test
+        run: cargo test --release
+
+      - name: Build
+        # Static CRT: the .exe files don't need the Visual C++ redistributable installed.
+        # Explicit --target keeps the flag off build scripts and proc-macros.
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --release --bins --target ${{ env.TARGET }}
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          $bin = "target/${{ env.TARGET }}/release"
+          & "$bin/ember.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "ember.exe --version failed" }
+          & "$bin/ember.exe" config-path
+          # No VC++ runtime DLL dependency (static CRT).
+          $dumpbin = Get-ChildItem "${env:ProgramFiles}\Microsoft Visual Studio" -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue |
+            Where-Object FullName -match 'Hostx64\\x64' | Select-Object -First 1
+          if ($dumpbin) {
+            foreach ($exe in "ember.exe", "ember-tray.exe") {
+              $deps = & $dumpbin.FullName /dependents "$bin/$exe" | Out-String
+              Write-Host $deps
+              if ($deps -match 'VCRUNTIME|MSVCP') { throw "$exe depends on the VC++ runtime" }
+            }
+          }
+
+      - name: Package
+        id: package
+        shell: pwsh
+        run: |
+          $name = "${{ steps.version.outputs.name }}"
+          $bin = "target/${{ env.TARGET }}/release"
+          New-Item -ItemType Directory -Path "dist/$name" | Out-Null
+          Copy-Item "$bin/ember.exe", "$bin/ember-tray.exe", README.md, LICENSE, config.example.toml,
+            contrib/enable-full-gamma-range.reg -Destination "dist/$name"
+          Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
+          $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File -Encoding ascii "dist/$name.zip.sha256"
+          Get-Content "dist/$name.zip.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.version.outputs.name }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $name = "${{ steps.version.outputs.name }}"
+          $files = "dist/$name.zip", "dist/$name.zip.sha256"
+          @"
+          ## Install (Windows 10/11)
+
+          1. Download ``$name.zip`` below and extract it anywhere (e.g. ``%LOCALAPPDATA%\Programs\Ember``).
+          2. Run **ember-tray.exe**. Ember appears in the system tray; right-click it for the menu.
+          3. Optional: tick **Start with Windows** in the tray menu.
+
+          **"Windows protected your PC"**: the .exe files aren't code-signed yet, so SmartScreen warns
+          on first launch. Click *More info* → *Run anyway*. You can check the download against the
+          ``.sha256`` file: ``Get-FileHash $name.zip``.
+
+          **Warm colours not applying below ~4000K?** Double-click ``enable-full-gamma-range.reg``
+          (needs admin), then sign out and back in. See the README for details.
+
+          ``ember.exe`` is the command-line version (``ember.exe --help``).
+          "@ | Out-File -Encoding utf8 notes.md
+
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            # Re-run of the workflow for an existing release: replace the assets.
+            gh release upload $tag @files --clobber
+          } else {
+            $flags = @()
+            if ($tag.Contains("-")) { $flags += "--prerelease" }
+            gh release create $tag @files --verify-tag --title "Ember $tag" --notes-file notes.md --generate-notes @flags
+          }
+          if ($LASTEXITCODE -ne 0) { throw "gh release failed" }

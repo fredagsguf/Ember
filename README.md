@@ -25,6 +25,14 @@ Early. Two programs: **`ember-tray`** (system tray app — what most people want
 
 ## Install
 
+### Windows
+
+Download `ember-vX.Y.Z-windows-x64.zip` from [Releases](https://github.com/fredagsguf/Ember/releases), extract it anywhere, and run **`ember-tray.exe`**. No installer or runtime needed.
+
+The .exe files aren't code-signed yet, so the first launch shows *"Windows protected your PC"*: click **More info → Run anyway**. Each release has a `.sha256` file you can check with `Get-FileHash`.
+
+### From source (Windows or Linux)
+
 Requires Rust (https://rustup.rs).
 
 ```bash
@@ -128,6 +136,15 @@ cargo check --target x86_64-pc-windows-gnu   # type-check the Windows backend fr
 ```
 
 Layout: `src/lib.rs` is the shared library; `src/main.rs` is the `ember` CLI and `src/bin/ember-tray/` the tray app (`windows.rs` uses `tray-icon`, `linux.rs` uses `ksni`). Shared pieces: `daemon.rs` (run loop, single-instance lock), `tray_model.rs` (menu state, actions, icon drawing), `src/bin/ember-tray/settings.rs` (egui settings window), `autostart.rs`, `color.rs` (Kelvin → RGB → gamma ramp), `solar.rs` (sun elevation), `schedule.rs`, `rules.rs` (per-app matching), `engine.rs` (decision + process watching), `gamma/` (platform backends), `main.rs` (CLI + run loop).
+
+## Releasing
+
+1. Bump `version` in `Cargo.toml` and commit.
+2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`
+
+The [Release workflow](.github/workflows/release.yml) checks the tag matches `Cargo.toml`, runs the tests, builds `ember.exe` and `ember-tray.exe` with a static C runtime, zips them with the README, example config and registry fix, and publishes a GitHub Release with a SHA-256 checksum. Tags with a suffix (`v0.2.0-beta.1`) become pre-releases. Running the workflow manually from the Actions tab builds the zip as a downloadable artifact without releasing.
+
+The exe icon lives in `assets/ember.ico`; regenerate it with `cargo run --example make_ico` after changing the icon drawing in `tray_model.rs`.
 
 ## License
 
