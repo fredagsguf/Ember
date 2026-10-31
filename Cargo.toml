@@ -1,0 +1,31 @@
+[package]
+name = "ember"
+version = "0.1.0"
+edition = "2024"
+description = "Open-source f.lux alternative with per-game rules"
+license = "MIT"
+repository = "https://github.com/fredagsguf/Ember"
+keywords = ["flux", "night-light", "blue-light", "gamma", "redshift"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+anyhow = "1.0.104"
+chrono = "0.4.45"
+clap = { version = "4.6.7", features = ["derive"] }
+ctrlc = { version = "3.5.2", features = ["termination"] }
+directories = "6.0.0"
+env_logger = "0.11.11"
+log = "0.4.35"
+serde = { version = "1.0.229", features = ["derive"] }
+sysinfo = "0.40.1"
+toml = "1.1.8"
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_ColorSystem"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.14.0", features = ["randr"] }
+
+[profile.release]
+lto = true
+strip = true

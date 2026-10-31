@@ -1,0 +1,50 @@
+# Ember configuration.
+# Linux:   ~/.config/ember/config.toml
+# Windows: %APPDATA%\ember\config\config.toml
+# Run `ember config-path` to see where Ember looks. Changes are picked up live.
+
+[general]
+poll_interval_secs = 2   # how often to check running games and re-apply colours
+fade_secs = 0.5          # fade when a rule switches on/off (0 = instant)
+
+[color]
+day_temperature = 6500   # Kelvin; 6500 = no tint
+night_temperature = 3400 # lower = warmer/redder (1000..10000)
+day_brightness = 1.0     # 0.1..1.0
+night_brightness = 1.0
+
+[schedule]
+# "fixed"        – use night_start / night_end below
+# "solar"        – follow sunset/sunrise at latitude/longitude
+# "always_night" – always use the night settings
+mode = "fixed"
+night_start = "21:00"
+night_end = "07:00"
+transition_minutes = 45
+# latitude = 59.91
+# longitude = 10.75
+
+# ---------------------------------------------------------------------------
+# Per-application rules. The first matching rule wins.
+#
+#   processes   – process names; case-insensitive, ".exe" optional
+#   when        – "focused" (default): only while the app is in the foreground
+#                 "running": as long as the process exists
+#   temperature / brightness – override values. Leave both out to fully
+#                 disable Ember while the rule matches.
+# ---------------------------------------------------------------------------
+
+[[rules]]
+name = "Counter-Strike 2"
+processes = ["cs2"]
+when = "focused"
+
+# [[rules]]
+# name = "Photo editing"
+# processes = ["photoshop", "gimp", "darktable"]
+# when = "focused"
+
+# [[rules]]
+# name = "Movies: dim but keep it warm-ish"
+# processes = ["vlc", "mpv"]
+# temperature = 5000
