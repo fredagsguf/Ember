@@ -7,6 +7,9 @@ on:
 jobs:
   windows:
     runs-on: windows-latest
+    permissions:
+      # Pushes the UI screenshots to the ci-screenshots branch.
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -20,3 +23,22 @@ jobs:
         with:
           name: ember-windows
           path: target/release/ember.exe
+
+      - name: UI check (settings screenshots, title and fullscreen rules)
+        shell: pwsh
+        run: .github/scripts/windows-ui-check.ps1 -Exe target/release/ember.exe -Out ui-check
+
+      - name: Publish screenshots to the ci-screenshots branch
+        if: always() && github.event_name == 'push'
+        shell: bash
+        run: |
+          [ -d ui-check ] || exit 0
+          cd ui-check
+          git init -q -b ci-screenshots
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          printf '# UI check for %s\n\nBranch %s, run %s/%s/actions/runs/%s\n' \
+            "$GITHUB_SHA" "$GITHUB_REF_NAME" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > README.md
+          git add -A
+          git commit -q -m "UI check for $GITHUB_SHA ($GITHUB_REF_NAME)"
+          git push -q -f "https://x-access-token:${{ github.token }}@github.com/$GITHUB_REPOSITORY" ci-screenshots
