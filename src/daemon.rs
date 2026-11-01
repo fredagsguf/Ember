@@ -13,7 +13,13 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 /// How long to fade when the scheduled colour jumps instead of drifting (see [`is_jump`]).
-const JUMP_FADE_SECS: f64 = 5.0;
+const JUMP_FADE: Duration = Duration::from_secs(7 * 60);
+
+/// A fade towards the scheduled colour after it jumped, started at `start` from `from`.
+struct JumpFade {
+    from: ColorSetting,
+    start: Instant,
+}
 
 /// Processes that are "the desktop", not an app the user would want a rule for.
 /// Used so that clicking the tray icon doesn't make the taskbar the "current app".
@@ -180,6 +186,7 @@ fn run_locked(opts: &Options, rx: Receiver<Msg>, state: &Mutex<State>) -> Result
     let mut current: Option<ColorSetting> = None;
     let mut last_reason: Option<Reason> = None;
     let mut last_app: Option<String> = None;
+    let mut jump: Option<JumpFade> = None;
 
     loop {
         let m = mtime(path);
@@ -202,7 +209,31 @@ fn run_locked(opts: &Options, rx: Receiver<Msg>, state: &Mutex<State>) -> Result
         {
             last_app = Some(f.clone());
         }
-        let d = engine::decide(&cfg, &snap);
+        let mut d = engine::decide(&cfg, &snap);
+        // The schedule can still jump: Ember starting in the evening (the screen is neutral until
+        // now), waking from sleep, or an edited schedule. Ease into those over minutes, one poll
+        // at a time so rules, pausing and previews still react at once. While a rule or pause
+        // takes over, the fade keeps running underneath.
+        if d.reason == Reason::Schedule
+            && jump.is_none()
+            && matches!(last_reason, None | Some(Reason::Schedule))
+        {
+            let from = current.unwrap_or(ColorSetting::NEUTRAL);
+            if is_jump(from, d.setting) {
+                jump = Some(JumpFade {
+                    from,
+                    start: Instant::now(),
+                });
+            }
+        }
+        if let Some(j) = &jump {
+            let t = j.start.elapsed().as_secs_f64() / JUMP_FADE.as_secs_f64();
+            if t >= 1.0 {
+                jump = None;
+            } else if d.reason == Reason::Schedule {
+                d.setting = color::lerp(j.from, d.setting, t);
+            }
+        }
         backend.set_app_rule_active(matches!(d.reason, Reason::Rule(_)));
         if last_reason.as_ref() != Some(&d.reason) {
             log::info!(
@@ -219,25 +250,19 @@ fn run_locked(opts: &Options, rx: Receiver<Msg>, state: &Mutex<State>) -> Result
             && last_reason.as_ref() != Some(&d.reason)
             && d.reason != Reason::Preview
             && last_reason != Some(Reason::Preview);
-        // The schedule can still jump: Ember starting in the evening (the screen is neutral until
-        // now), waking from sleep, or an edited schedule. Fade those too instead of snapping.
-        let from = current.unwrap_or(ColorSetting::NEUTRAL);
-        let schedule_jump = d.reason == Reason::Schedule
-            && matches!(last_reason, None | Some(Reason::Schedule))
-            && is_jump(from, d.setting);
-        let fade_secs = if state_changed {
-            cfg.general.fade_secs
-        } else if schedule_jump {
-            JUMP_FADE_SECS
-        } else {
-            0.0
-        };
         let mut stop = false;
-        if fade_secs > 0.0 {
-            stop = fade(backend.as_mut(), from, d.setting, fade_secs, &rx);
-        } else {
+        match current {
+            Some(from) if state_changed && cfg.general.fade_secs > 0.0 => {
+                stop = fade(
+                    backend.as_mut(),
+                    from,
+                    d.setting,
+                    cfg.general.fade_secs,
+                    &rx,
+                )
+            }
             // Re-apply every tick: games, driver resets and display hot-plugs can clobber the ramp.
-            apply(backend.as_mut(), d.setting);
+            _ => apply(backend.as_mut(), d.setting),
         }
         current = Some(d.setting);
         last_reason = Some(d.reason.clone());
@@ -256,9 +281,12 @@ fn run_locked(opts: &Options, rx: Receiver<Msg>, state: &Mutex<State>) -> Result
         if stop {
             break;
         }
-        // Poll quickly while previewing so we notice the end of the drag promptly.
+        // Poll quickly while previewing so we notice the end of the drag promptly, and at least
+        // every second while easing into a jump so its steps stay too small to see.
         let wait = if is_preview(&last_reason) {
             Duration::from_millis(200)
+        } else if jump.is_some() {
+            Duration::from_secs(1)
         } else {
             Duration::from_secs(cfg.general.poll_interval_secs.max(1))
         };
