@@ -933,7 +933,7 @@ impl eframe::App for SettingsApp {
                     ui.add_space(6.0);
                     let mut bedtime = !s.bedtime.trim().is_empty();
                     ui.horizontal(|ui| {
-                        if ui.checkbox(&mut bedtime, "Bedtime: go warmer still from").changed() {
+                        if ui.checkbox(&mut bedtime, "Bedtime: even warmer from").changed() {
                             s.bedtime = if bedtime { "23:00".into() } else { String::new() };
                         }
                         if bedtime {
