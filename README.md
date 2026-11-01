@@ -10,7 +10,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/fredagsguf/Ember/releases/latest"><img src="https://img.shields.io/github/v/release/fredagsguf/Ember?style=for-the-badge&label=Download%20for%20Windows&color=f08c28&logo=windows&logoColor=white" alt="Download for Windows"></a>
+  <a href="#windows-10-and-11"><img src="https://img.shields.io/badge/Download-Windows-f08c28?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows"></a>
+  <a href="#linux"><img src="https://img.shields.io/badge/Download-Linux-f08c28?style=for-the-badge&logo=linux&logoColor=white" alt="Download for Linux"></a>
+  <br>
+  <a href="https://github.com/fredagsguf/Ember/releases/latest"><img src="https://img.shields.io/github/v/release/fredagsguf/Ember?label=latest%20release&color=555" alt="Latest release"></a>
 </p>
 
 <p align="center">
@@ -32,9 +35,11 @@ Warm, dim light in the evening is easier on the eyes and on your sleep. That's w
 
 - **Per-app rules.** Turn Ember off, or use a different colour, while a specific app is focused or simply running. Add one in two clicks from the tray: open the game, click the tray icon, tick *Disable while "cs2" is focused*.
 - **Follows the sun or your clock.** Warm up at sunset and back at sunrise for your city, or pick fixed times. Every change fades in gently.
-- **Live-preview settings.** Drag a slider and your screen shows that exact colour while you hold it.
+- **Settings one click away.** Click the tray icon and the settings window opens right above it. Drag a slider and your screen shows that exact colour while you hold it.
 - **Pause when you need to.** Disable for 15 minutes, an hour or three hours, or until you switch it back on. Press **Ctrl+Alt+End** from any app to pause or resume (you can change the hotkey in Settings).
-- **Light and private.** One small exe with no installer and no runtime. Ember never connects to the internet: sunset times are calculated on your PC.
+- **Respects your calibration.** If your monitor is colour-calibrated, Ember tints on top of your calibration curve and puts it back when it steps aside, instead of wiping it.
+- **Windows and Linux.** Windows 10/11, any Linux desktop on X11, and Wayland on sway, Hyprland and other wlroots compositors or KDE Plasma.
+- **Light and private.** One small program with no installer and no runtime. Ember never connects to the internet: sunset times are calculated on your PC.
 - **Free and open source** under the MIT license.
 
 ## Get Ember
@@ -52,7 +57,7 @@ Warm, dim light in the evening is easier on the eyes and on your sleep. That's w
 
 ### Linux
 
-Download the latest `ember-vX.Y.Z-linux-x64.tar.gz` from **[Releases](https://github.com/fredagsguf/Ember/releases/latest)** (x86-64, any distro with glibc 2.35 or newer: Ubuntu 22.04+, Debian 12+, Fedora 36+, Arch…) and install it for your user:
+Download the latest `ember-vX.Y.Z-linux-x64.tar.gz` from **[Releases](https://github.com/fredagsguf/Ember/releases/latest)** and install it for your user. It's built for x86-64 and runs on any distro with glibc 2.35 or newer (Ubuntu 22.04+, Debian 12+, Fedora 36+, Arch…). Linux packages are published from v0.1.2 on.
 
 ```bash
 tar -xzf ember-v*-linux-x64.tar.gz
@@ -69,18 +74,20 @@ Ember needs a StatusNotifierItem tray, which KDE, XFCE, Cinnamon, LXQt and wayba
 
 What works depends on your session. Ember picks the right method by itself, and the tray shows an error if your desktop isn't supported:
 
-| Session | How Ember changes the colours | "Focused" rules match | Notes |
-|---|---|---|---|
-| X11, any desktop | RandR gamma ramps | process name | Everything works |
-| Wayland: sway, Hyprland, river, Wayfire, labwc and other wlroots compositors | `wlr-gamma-control` | the window's **app_id** | Only one program can own the gamma, so quit gammastep/wlsunset first |
-| Wayland: KDE Plasma 5.18+ | KDE's own Night Light | process name of X11/XWayland apps | See below |
-| Wayland: GNOME | not possible | — | GNOME doesn't let apps change the colours; use its built-in Night Light |
+| Session | How Ember changes the colours | "Focused" rules match | Toggle hotkey | Notes |
+|---|---|---|---|---|
+| X11, any desktop | RandR gamma ramps | process name | ✓ | Everything works |
+| Wayland: sway, Hyprland, river, Wayfire, labwc and other wlroots compositors | `wlr-gamma-control` | the window's **app_id** | — | Only one program can own the gamma, so quit gammastep/wlsunset first |
+| Wayland: KDE Plasma 5.18+ | KDE's own Night Light | process name of X11/XWayland apps | — | See below |
+| Wayland: GNOME | not possible | — | — | GNOME doesn't let apps change the colours; use its built-in Night Light |
+
+The toggle hotkey needs X11 for now; on Wayland, pause and resume from the tray menu.
 
 **KDE Plasma on Wayland.** KWin doesn't let apps set colours, so Ember works through KDE's Night Light. Turn it on in *System Settings → Display & Monitor → Night Light* and pick the colour and times there. Ember then switches Night Light off while a rule disables Ember, while Ember is paused, and during the day by Ember's own schedule (set Ember's schedule to *always night* to leave the timing entirely to KDE). Ember's temperature and brightness sliders, and rules that set a custom colour, have no effect there, and the settings window can't preview. Focused rules see apps running through XWayland, which includes most games (Steam, Proton, Wine), but not native Wayland windows.
 
 ## Settings
 
-Open them from the tray icon (**Settings…**).
+Click the tray icon, or pick **Settings…** from its menu. The window opens right above the icon, styled to match the logo.
 
 <p align="center">
   <img src="docs/settings.png" width="560" alt="Ember's settings window with colour sliders, schedule options and an app rule for Counter-Strike 2">
@@ -90,7 +97,7 @@ Changes save as you make them and apply within a couple of seconds; there's no S
 
 ## The tray icon
 
-The moon glows while Ember is warming your screen and turns grey when it isn't (daytime, paused, or a rule has switched it off). Right-click it for the menu:
+The moon glows while Ember is warming your screen and turns grey when it isn't (daytime, paused, or a rule has switched it off). Click it to open the settings; right-click it for the menu:
 
 | Item | What it does |
 |---|---|
@@ -122,17 +129,33 @@ Use *Start with Windows* (or *Start at login* on Linux) in the tray menu. Don't 
 
 ## Status and roadmap
 
-Ember is young. Windows 10/11, Linux on X11, and Wayland on wlroots compositors and KDE Plasma are supported; GNOME on Wayland and macOS aren't.
+Ember is young. Windows 10/11, Linux on X11, and Wayland on wlroots compositors and KDE Plasma are supported. The Linux and Wayland support is new and hasn't been tried on many real machines yet, so bug reports are especially welcome there.
+
+**Done**
 
 - [x] Tray app with per-app rules, timed pause and autostart
-- [x] Settings window with live preview, sunset/sunrise schedule and rule editor
+- [x] Settings window with live preview, sunset/sunrise schedule and rule editor, opening above the tray icon
 - [x] Prebuilt releases for Windows and Linux
 - [x] Wayland: wlroots compositors (sway, Hyprland…) via wlr-gamma-control, KDE Plasma via its Night Light
-- [ ] Wayland: GNOME (GNOME has no API for apps to change the colours)
-- [ ] Wayland on KDE: detect focused native Wayland apps (only XWayland apps are seen today)
-- [ ] macOS
 - [x] Keep your calibration curve instead of resetting to neutral
-- [x] Global hotkey to toggle
+- [x] Global hotkey to toggle (Windows and X11)
+
+**To do**
+
+- [ ] Toggle hotkey on Wayland, through the desktop's global-shortcuts portal
+- [ ] KDE on Wayland: see native Wayland windows for "focused" rules (only XWayland apps today)
+- [ ] Live preview in the settings window on wlroots while Ember is running (it says "unavailable" although the running Ember still applies the preview)
+- [ ] Pick up a calibration curve loaded while Ember is already running, not only at start
+- [ ] Clicking the tray icon while the settings window is open brings it to the front
+- [ ] Code-sign `ember.exe` so Windows stops showing "Windows protected your PC"
+- [ ] Install packages: winget for Windows; AUR, Flatpak or `.deb` for Linux
+- [ ] Per-monitor settings, e.g. leaving a colour-critical screen untouched
+- [ ] Run the Linux tests in CI on every push, not only when releasing
+
+**Not planned**
+
+- GNOME on Wayland: GNOME doesn't let apps change the screen colours. Its built-in Night Light, or an X11 session, is the way to go there.
+- macOS.
 
 Ideas and bug reports are welcome in [Issues](https://github.com/fredagsguf/Ember/issues).
 
@@ -188,7 +211,7 @@ The logo is drawn in code (`icon_rgba` in `tray_model.rs`). `assets/ember.ico`, 
 1. Bump `version` in `Cargo.toml` and commit.
 2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`
 
-The [Release workflow](.github/workflows/release.yml) checks the tag matches `Cargo.toml` and runs the tests on Windows and Linux. It builds `ember.exe` with a static C runtime and zips it with the README, example config and registry fix; builds the Linux binary on Ubuntu 22.04 (for older-glibc compatibility) and packs it with a `.desktop` launcher and icon; then publishes both in one GitHub Release with SHA-256 checksums. Tags with a suffix (`v0.2.0-beta.1`) become pre-releases. Running the workflow manually from the Actions tab builds the zip as a downloadable artifact without releasing.
+The [Release workflow](.github/workflows/release.yml) checks the tag matches `Cargo.toml` and runs the tests on Windows and Linux. It builds `ember.exe` with a static C runtime and zips it with the README, example config and registry fix; builds the Linux binary on Ubuntu 22.04 (for older-glibc compatibility) and packs it with a `.desktop` launcher and icon; then publishes both in one GitHub Release with SHA-256 checksums. Tags with a suffix (`v0.2.0-beta.1`) become pre-releases. Running the workflow manually from the Actions tab builds both packages as downloadable artifacts without releasing.
 
 </details>
 
