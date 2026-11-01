@@ -54,15 +54,23 @@ function Write-Config([string] $name, [string] $text) {
     $path
 }
 
+$failed = @()
+
 # Open the settings window with `config` and screenshot it from top to bottom.
 function Show-Settings([string] $name, [string] $config) {
     $cfg = Write-Config $name $config
     $p = Start-Process $Exe -ArgumentList '--settings', '-c', "`"$cfg`"" -PassThru
-    for ($i = 0; $i -lt 30 -and $p.MainWindowHandle -eq 0; $i++) {
+    # An error shows up as a message box titled "Ember"; only the real window will do.
+    for ($i = 0; $i -lt 30 -and $p.MainWindowTitle -ne 'Ember settings'; $i++) {
         Start-Sleep 1
         $p.Refresh()
     }
-    if ($p.MainWindowHandle -eq 0) { throw "the settings window didn't open" }
+    if ($p.MainWindowTitle -ne 'Ember settings') {
+        Save-Screen "settings-$name-failed"
+        $script:failed += "settings window ($name)"
+        Stop-Process $p -ErrorAction SilentlyContinue
+        return
+    }
     Start-Sleep 3
     [Win]::Focus($p.MainWindowHandle)
     $r = New-Object Win+RECT
@@ -162,9 +170,8 @@ $settingsLog = Join-Path $env:LOCALAPPDATA 'ember\data\settings.log'
 if (Test-Path $settingsLog) { Copy-Item $settingsLog (Join-Path $Out 'settings.log') }
 
 $text = Get-Content $log -Raw
-$failed = @()
 foreach ($rule in 'title-check', 'fullscreen-check') {
     if ($text -match "\(rule `"$rule`"\)") { Write-Host "ok: rule $rule matched" }
-    else { $failed += $rule }
+    else { $failed += "rule $rule" }
 }
-if ($failed) { throw "rules never matched: $($failed -join ', '). See ember.log." }
+if ($failed) { throw "failed: $($failed -join ', '). See the screenshots and logs." }
