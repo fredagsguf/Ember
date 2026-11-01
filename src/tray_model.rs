@@ -194,38 +194,81 @@ pub fn log_path() -> PathBuf {
     crate::config::state_dir().join("ember.log")
 }
 
-/// Draw the tray icon: a glowing ember when active, a grey ring when not.
+/// Draw the tray icon: a crescent moon cradling a round ember. Glowing yellow to red while
+/// Ember is tinting the screen, flat grey when it isn't.
 /// Returns straight (non-premultiplied) RGBA, row-major.
 pub fn icon_rgba(size: u32, active: bool) -> Vec<u8> {
+    const SS: u32 = 4; // samples per pixel along each axis
     let mut px = vec![0u8; (size * size * 4) as usize];
-    let c = (size as f32 - 1.0) / 2.0;
-    let r_outer = size as f32 * 0.46;
+    let n = (size * SS) as f32;
     for y in 0..size {
         for x in 0..size {
-            let d = ((x as f32 - c).powi(2) + (y as f32 - c).powi(2)).sqrt();
-            // 1px anti-aliased edge
-            let cover = (r_outer + 0.5 - d).clamp(0.0, 1.0);
-            if cover <= 0.0 {
-                continue;
+            let (mut rgb, mut cover) = ([0.0f32; 3], 0.0f32);
+            for sy in 0..SS {
+                for sx in 0..SS {
+                    // Shape coordinates run 0..1 across the icon, y pointing down.
+                    let u = ((x * SS + sx) as f32 + 0.5) / n;
+                    let v = ((y * SS + sy) as f32 + 0.5) / n;
+                    let (dist, heat) = icon_shape(u, v);
+                    let a = (0.5 - dist * size as f32).clamp(0.0, 1.0);
+                    if a > 0.0 {
+                        let c = if active {
+                            heat_colour(heat)
+                        } else {
+                            [150.0; 3]
+                        };
+                        for k in 0..3 {
+                            rgb[k] += c[k] * a;
+                        }
+                        cover += a;
+                    }
+                }
             }
-            let t = (d / r_outer).clamp(0.0, 1.0);
-            let (rgb, alpha) = if active {
-                // Hot yellow core fading to deep orange-red.
-                let mix = |a: f32, b: f32| a + (b - a) * t;
-                ([mix(255.0, 226.0), mix(200.0, 74.0), mix(90.0, 28.0)], 1.0)
-            } else {
-                // Grey ring.
-                let ring = ((d - r_outer * 0.62) * 2.0).clamp(0.0, 1.0);
-                ([150.0, 150.0, 150.0], ring)
-            };
-            let i = ((y * size + x) * 4) as usize;
-            px[i] = rgb[0] as u8;
-            px[i + 1] = rgb[1] as u8;
-            px[i + 2] = rgb[2] as u8;
-            px[i + 3] = (alpha * cover * 255.0) as u8;
+            if cover > 0.0 {
+                let i = ((y * size + x) * 4) as usize;
+                for k in 0..3 {
+                    px[i + k] = (rgb[k] / cover).round() as u8;
+                }
+                px[i + 3] = (cover / (SS * SS) as f32 * 255.0).round() as u8;
+            }
         }
     }
     px
+}
+
+/// At a point of the icon (0..1 across, y down): the signed distance to the outline in
+/// icon-widths (negative inside), and how hot it glows from 0 (hottest) to 1.
+fn icon_shape(x: f32, y: f32) -> (f32, f32) {
+    let dist = |cx: f32, cy: f32| (x - cx).hypot(y - cy);
+    // Crescent: a disc with a smaller disc bitten out of its upper right.
+    let (bite_x, bite_y, bite_r) = (0.67, 0.34, 0.34);
+    let moon = (dist(0.45, 0.55) - 0.42).max(bite_r - dist(bite_x, bite_y));
+    // The ember, sitting in the curve of the moon.
+    let (ember_x, ember_y, ember_r) = (0.70, 0.34, 0.12);
+    let ember = dist(ember_x, ember_y) - ember_r;
+    if ember < moon {
+        let heat = (dist(ember_x, ember_y) / ember_r).min(1.0) * 0.45;
+        (ember, heat)
+    } else {
+        // The moon glows hottest along its inner edge and cools towards the rim.
+        let heat = ((dist(bite_x, bite_y) - bite_r) / 0.30)
+            .clamp(0.0, 1.0)
+            .powf(0.7);
+        (moon, heat)
+    }
+}
+
+/// Hot yellow (0) through orange to deep coal red (1).
+fn heat_colour(t: f32) -> [f32; 3] {
+    const HOT: [f32; 3] = [255.0, 214.0, 102.0];
+    const MID: [f32; 3] = [255.0, 140.0, 40.0];
+    const DEEP: [f32; 3] = [214.0, 54.0, 30.0];
+    let (from, to, f) = if t < 0.5 {
+        (HOT, MID, t * 2.0)
+    } else {
+        (MID, DEEP, t * 2.0 - 1.0)
+    };
+    std::array::from_fn(|k| from[k] + (to[k] - from[k]) * f)
 }
 
 #[cfg(test)]
@@ -234,13 +277,22 @@ mod tests {
 
     #[test]
     fn icon_has_expected_size_and_transparent_corners() {
-        let px = icon_rgba(32, true);
-        assert_eq!(px.len(), 32 * 32 * 4);
-        assert_eq!(px[3], 0, "corner should be transparent");
-        let centre = ((16 * 32 + 16) * 4) as usize;
-        assert_eq!(px[centre + 3], 255);
-        let off = icon_rgba(32, false);
-        assert_eq!(off[centre + 3], 0, "inactive icon is a ring");
+        let px = icon_rgba(64, true);
+        assert_eq!(px.len(), 64 * 64 * 4);
+        let alpha = |px: &[u8], x: usize, y: usize| px[(y * 64 + x) * 4 + 3];
+        assert_eq!(alpha(&px, 0, 0), 0, "corner should be transparent");
+        assert_eq!(alpha(&px, 19, 44), 255, "moon body is solid");
+        assert_eq!(alpha(&px, 33, 25), 0, "moon's curve is empty");
+        assert_eq!(alpha(&px, 44, 21), 255, "ember sits in the curve");
+
+        let off = icon_rgba(64, false);
+        for (on, off) in px.chunks(4).zip(off.chunks(4)) {
+            assert_eq!(on[3], off[3], "same shape when inactive");
+            assert!(
+                off[3] == 0 || (off[0] == off[1] && off[1] == off[2]),
+                "inactive is grey"
+            );
+        }
     }
 
     #[test]
