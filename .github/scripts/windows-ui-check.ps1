@@ -76,7 +76,7 @@ function Show-Settings([string] $name, [string] $config) {
     $r = New-Object Win+RECT
     [Win]::GetWindowRect($p.MainWindowHandle, [ref] $r) | Out-Null
     [Win]::SetCursorPos([int](($r.Left + $r.Right) / 2), [int](($r.Top + $r.Bottom) / 2)) | Out-Null
-    for ($k = 0; $k -lt 6; $k++) {
+    for ($k = 0; $k -lt 12; $k++) {
         Start-Sleep -Milliseconds 800
         Save-Screen "settings-$name-$k"
         [Win]::mouse_event(0x0800, 0, 0, -480, [UIntPtr]::Zero) # wheel down
