@@ -11,11 +11,53 @@ use x11rb::protocol::randr::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{Atom, AtomEnum, ConnectionExt as _, Window};
 use x11rb::rust_connection::RustConnection;
 
-pub struct RandR {
+/// Focused-window lookup via `_NET_ACTIVE_WINDOW` + `_NET_WM_PID`. Also used on Wayland desktops
+/// whose compositor publishes the active XWayland window this way (KWin, Mutter); native Wayland
+/// windows show up there as "no window".
+pub struct Focus {
     conn: RustConnection,
     root: Window,
     net_active_window: Atom,
     net_wm_pid: Atom,
+}
+
+impl Focus {
+    pub fn connect() -> Result<Focus> {
+        let (conn, screen) =
+            x11rb::connect(None).context("connecting to the X server (is DISPLAY set?)")?;
+        let root = conn.setup().roots[screen].root;
+        let atom = |n: &[u8]| -> Result<Atom> { Ok(conn.intern_atom(false, n)?.reply()?.atom) };
+        let net_active_window = atom(b"_NET_ACTIVE_WINDOW")?;
+        let net_wm_pid = atom(b"_NET_WM_PID")?;
+        Ok(Focus {
+            conn,
+            root,
+            net_active_window,
+            net_wm_pid,
+        })
+    }
+
+    fn property_u32(&self, window: Window, prop: Atom, ty: AtomEnum) -> Option<u32> {
+        let reply = self
+            .conn
+            .get_property(false, window, prop, ty, 0, 1)
+            .ok()?
+            .reply()
+            .ok()?;
+        reply.value32()?.next()
+    }
+
+    pub fn focused_pid(&self) -> Option<u32> {
+        let win = self.property_u32(self.root, self.net_active_window, AtomEnum::WINDOW)?;
+        if win == 0 {
+            return None;
+        }
+        self.property_u32(win, self.net_wm_pid, AtomEnum::CARDINAL)
+    }
+}
+
+pub struct RandR {
+    focus: Focus,
     calibration: Calibration,
 }
 
@@ -29,20 +71,14 @@ struct Crtc {
 
 impl RandR {
     pub fn open(preserve_calibration: bool) -> Result<RandR> {
-        let (conn, screen) =
-            x11rb::connect(None).context("connecting to the X server (is DISPLAY set?)")?;
-        let root = conn.setup().roots[screen].root;
-        conn.randr_query_version(1, 3)?
+        let focus = Focus::connect()?;
+        focus
+            .conn
+            .randr_query_version(1, 3)?
             .reply()
             .context("X server lacks RandR 1.3")?;
-        let atom = |n: &[u8]| -> Result<Atom> { Ok(conn.intern_atom(false, n)?.reply()?.atom) };
-        let net_active_window = atom(b"_NET_ACTIVE_WINDOW")?;
-        let net_wm_pid = atom(b"_NET_WM_PID")?;
         let mut me = RandR {
-            conn,
-            root,
-            net_active_window,
-            net_wm_pid,
+            focus,
             calibration: Calibration::new(preserve_calibration),
         };
         let crtcs = me.crtcs()?;
@@ -51,15 +87,19 @@ impl RandR {
         Ok(me)
     }
 
+    fn conn(&self) -> &RustConnection {
+        &self.focus.conn
+    }
+
     /// Current CRTCs with their gamma size. Re-queried each time so hot-plugged monitors work.
     fn crtcs(&self) -> Result<Vec<Crtc>> {
         let res = self
-            .conn
-            .randr_get_screen_resources_current(self.root)?
+            .conn()
+            .randr_get_screen_resources_current(self.focus.root)?
             .reply()?;
         let mut out = Vec::with_capacity(res.crtcs.len());
         for &id in &res.crtcs {
-            let gamma_size = self.conn.randr_get_crtc_gamma_size(id)?.reply()?.size as usize;
+            let gamma_size = self.conn().randr_get_crtc_gamma_size(id)?.reply()?.size as usize;
             if gamma_size == 0 {
                 continue;
             }
@@ -75,11 +115,11 @@ impl RandR {
 
     /// The names of the outputs `crtc` drives, joined with `+` (cloned outputs share a CRTC).
     fn output_names(&self, crtc: randr::Crtc, timestamp: u32) -> Result<Option<String>> {
-        let info = self.conn.randr_get_crtc_info(crtc, timestamp)?.reply()?;
+        let info = self.conn().randr_get_crtc_info(crtc, timestamp)?.reply()?;
         let mut names = Vec::with_capacity(info.outputs.len());
         for &output in &info.outputs {
             let o = self
-                .conn
+                .conn()
                 .randr_get_output_info(output, timestamp)?
                 .reply()?;
             names.push(String::from_utf8_lossy(&o.name).into_owned());
@@ -89,7 +129,7 @@ impl RandR {
 
     /// The ramp currently loaded on `crtc` (by xcalib/dispwin, the desktop, or us).
     fn read_ramp(&self, crtc: randr::Crtc) -> Option<Ramp> {
-        let g = self.conn.randr_get_crtc_gamma(crtc).ok()?.reply().ok()?;
+        let g = self.conn().randr_get_crtc_gamma(crtc).ok()?.reply().ok()?;
         Some(Ramp {
             red: g.red,
             green: g.green,
@@ -110,16 +150,6 @@ impl RandR {
             self.calibration.capture(new);
         }
     }
-
-    fn property_u32(&self, window: Window, prop: Atom, ty: AtomEnum) -> Option<u32> {
-        let reply = self
-            .conn
-            .get_property(false, window, prop, ty, 0, 1)
-            .ok()?
-            .reply()
-            .ok()?;
-        reply.value32()?.next()
-    }
 }
 
 impl Backend for RandR {
@@ -135,10 +165,10 @@ impl Backend for RandR {
                 Some(name) => self.calibration.ramp(name, setting, c.gamma_size),
                 None => Ramp::build(setting, c.gamma_size),
             };
-            self.conn
+            self.conn()
                 .randr_set_crtc_gamma(c.id, &r.red, &r.green, &r.blue)?;
         }
-        self.conn.flush()?;
+        self.conn().flush()?;
         Ok(())
     }
 
@@ -152,15 +182,11 @@ impl Backend for RandR {
     }
 
     fn sync(&mut self) -> Result<()> {
-        self.conn.get_input_focus()?.reply()?;
+        self.conn().get_input_focus()?.reply()?;
         Ok(())
     }
 
     fn focused_pid(&mut self) -> Option<u32> {
-        let win = self.property_u32(self.root, self.net_active_window, AtomEnum::WINDOW)?;
-        if win == 0 {
-            return None;
-        }
-        self.property_u32(win, self.net_wm_pid, AtomEnum::CARDINAL)
+        self.focus.focused_pid()
     }
 }

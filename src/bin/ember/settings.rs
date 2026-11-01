@@ -37,6 +37,8 @@ pub fn run(config_path: PathBuf, anchor: Option<Anchor>) -> Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Ember settings")
+            // Wayland app_id / X11 class; "ember" is skipped as a rule suggestion like the tray.
+            .with_app_id("ember")
             .with_inner_size([520.0, 680.0])
             .with_min_inner_size([420.0, 400.0])
             .with_icon(icon),
@@ -311,7 +313,11 @@ impl SettingsApp {
         };
         // Same calibration handling as the tray app, so previewing doesn't wipe the curve.
         let backend = match gamma::open(false, cfg.general.preserve_calibration) {
-            Ok(b) => Some(b),
+            Ok(b) if b.live_preview() => Some(b),
+            Ok(b) => {
+                log::info!("live preview unavailable with the {} backend", b.name());
+                None
+            }
             Err(e) => {
                 log::warn!("live preview unavailable: {e:#}");
                 None

@@ -1123,14 +1123,18 @@ dependencies = [
  "env_logger",
  "ksni",
  "log",
+ "rustix 1.1.6",
  "serde",
  "sysinfo",
  "toml 1.1.8+spec-1.1.0",
  "toml_edit 0.25.17+spec-1.1.0",
  "tray-icon",
+ "wayland-client",
+ "wayland-protocols-wlr",
  "windows-sys 0.61.2",
  "winresource",
  "x11rb 0.14.0",
+ "zbus",
 ]
 
 [[package]]
