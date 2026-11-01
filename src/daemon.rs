@@ -145,7 +145,7 @@ fn run_locked(opts: &Options, rx: Receiver<Msg>, state: &Mutex<State>) -> Result
     let path = &opts.config_path;
     let mut cfg = load_or_default(path)?;
     let mut cfg_mtime = mtime(path);
-    let mut backend = gamma::open(opts.dry_run)?;
+    let mut backend = gamma::open(opts.dry_run, cfg.general.preserve_calibration)?;
     let mut watcher = ProcessWatcher::new()?;
 
     log::info!(
@@ -164,6 +164,7 @@ fn run_locked(opts: &Options, rx: Receiver<Msg>, state: &Mutex<State>) -> Result
             match load_or_default(path) {
                 Ok(c) => {
                     log::info!("config reloaded ({} rule(s))", c.rules.len());
+                    backend.set_preserve_calibration(c.general.preserve_calibration);
                     cfg = c;
                 }
                 Err(e) => log::error!("keeping previous config: {e:#}"),
@@ -235,7 +236,7 @@ fn run_locked(opts: &Options, rx: Receiver<Msg>, state: &Mutex<State>) -> Result
         }
     }
 
-    log::info!("restoring neutral colours");
+    log::info!("restoring normal colours");
     backend.restore()
 }
 

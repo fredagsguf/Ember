@@ -304,7 +304,8 @@ impl SettingsApp {
                 )),
             ),
         };
-        let backend = match gamma::open(false) {
+        // Same calibration handling as the tray app, so previewing doesn't wipe the curve.
+        let backend = match gamma::open(false, cfg.general.preserve_calibration) {
             Ok(b) => Some(b),
             Err(e) => {
                 log::warn!("live preview unavailable: {e:#}");
@@ -362,6 +363,9 @@ impl SettingsApp {
         }
         self.file_mtime = m;
         if let Ok(c) = Config::load(&self.path) {
+            if let Some(b) = self.backend.as_mut() {
+                b.set_preserve_calibration(c.general.preserve_calibration);
+            }
             self.cfg = c.clone();
             self.saved = c;
             self.sync_proc_text();
@@ -737,6 +741,8 @@ impl eframe::App for SettingsApp {
                         ui.add(egui::Slider::new(&mut g.poll_interval_secs, 1..=10).suffix(" s"));
                         ui.end_row();
                     });
+                    ui.checkbox(&mut self.cfg.general.preserve_calibration, "Keep my display's calibration curve")
+                        .on_hover_text("Tint on top of the ICC/VCGT curve loaded by your calibration software, and put it back when Ember turns off. Untick to reset to neutral instead.");
                     ui.horizontal(|ui| {
                         if ui.button("Open config file").clicked() {
                             let _ = config::ensure_exists(&self.path);
@@ -773,6 +779,11 @@ impl eframe::App for SettingsApp {
         if self.cfg != before {
             self.last_edit = Some(Instant::now());
             self.message = None;
+        }
+        if self.cfg.general.preserve_calibration != before.general.preserve_calibration
+            && let Some(b) = self.backend.as_mut()
+        {
+            b.set_preserve_calibration(self.cfg.general.preserve_calibration);
         }
 
         match preview {

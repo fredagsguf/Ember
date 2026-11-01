@@ -95,7 +95,7 @@ Ember changes the display's colour curves through the same Windows API f.lux use
 Some fullscreen-exclusive games reset the colour curves; Ember re-applies its colours every couple of seconds. For games you've set a rule for, it doesn't matter: Ember is off while they're focused anyway.
 
 **What about my monitor's colour calibration?**
-When Ember turns off, it resets the display to neutral, which also clears a calibration curve (ICC/VCGT) loaded by other software until that software applies it again.
+Ember keeps it. When it starts, Ember reads the calibration curve (ICC/VCGT) that Windows colour management, DisplayCAL, `xcalib` or `dispwin` loaded into each display, tints on top of it, and puts it back when it turns off. Load your calibration before starting Ember (or restart Ember after loading a new one). Ember remembers each display's curve, so a crash can't leave its own tint behind as "calibration". A calibration that only scales the red, green and blue levels (no curve) looks the same as a tint, so Ember treats it as neutral. Untick *Keep my display's calibration curve* in Settings → Advanced (`preserve_calibration = false`) to reset to neutral as before.
 
 **Does it collect any data?**
 No. Ember has no network code at all. It writes a log file to `%LOCALAPPDATA%\ember\data\ember.log` (Linux: `~/.local/share/ember/ember.log`), and that never leaves your PC.
@@ -112,8 +112,8 @@ Ember is young. Windows 10/11 and Linux on X11 are supported; Wayland and macOS 
 - [x] Prebuilt Windows releases
 - [ ] Wayland (wlr-gamma-control for sway/Hyprland; GNOME/KDE night-light integration)
 - [ ] macOS
+- [x] Keep your calibration curve instead of resetting to neutral
 - [ ] Global hotkey to toggle
-- [ ] Keep your calibration curve instead of resetting to neutral
 
 Ideas and bug reports are welcome in [Issues](https://github.com/fredagsguf/Ember/issues).
 

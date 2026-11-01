@@ -6,6 +6,7 @@
 [general]
 poll_interval_secs = 2   # how often to check running games and re-apply colours
 fade_secs = 0.5          # fade when a rule switches on/off (0 = instant)
+preserve_calibration = true # keep your display's calibration curve (ICC/VCGT) under the tint
 
 [color]
 day_temperature = 6500   # Kelvin; 6500 = no tint
