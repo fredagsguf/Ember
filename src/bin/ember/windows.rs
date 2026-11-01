@@ -9,6 +9,7 @@ use tray_icon::menu::{
     CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
 };
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
@@ -19,22 +20,40 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, FindWindowW, IsIconic, MB_ICONERROR, MB_ICONINFORMATION, MB_OK,
     MESSAGEBOX_STYLE, MSG, MessageBoxW, MsgWaitForMultipleObjects, PM_REMOVE, PeekMessageW,
-    QS_ALLINPUT, SW_RESTORE, SetForegroundWindow, ShowWindow, TranslateMessage, WM_HOTKEY, WM_QUIT,
+    QS_ALLINPUT, SW_MINIMIZE, SW_RESTORE, SetForegroundWindow, ShowWindow, TranslateMessage,
+    WM_HOTKEY, WM_QUIT,
 };
 
 /// Our only `RegisterHotKey` id; `WM_HOTKEY` carries it in `wParam`.
 const HOTKEY_ID: i32 = 1;
+
+/// The settings window, if it's open.
+fn settings_window() -> Option<HWND> {
+    let title: Vec<u16> = "Ember settings".encode_utf16().chain(Some(0)).collect();
+    let hwnd = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
+    (!hwnd.is_null()).then_some(hwnd)
+}
+
+/// A left click on the icon while the settings window is showing puts it away, like the
+/// flyouts of Windows' own tray icons. Returns whether it did.
+fn minimize_settings_window() -> bool {
+    match settings_window() {
+        Some(hwnd) if unsafe { IsIconic(hwnd) } == 0 => {
+            unsafe { ShowWindow(hwnd, SW_MINIMIZE) };
+            true
+        }
+        _ => false,
+    }
+}
 
 /// Bring an open settings window to the front, restoring it if it's minimized. The tray process
 /// does this itself because the click gave it the right to take the foreground: asked by the
 /// short-lived second `ember --settings`, the window would at most flash in the taskbar, and
 /// while minimized it doesn't even run to see the request.
 fn raise_settings_window() {
-    let title: Vec<u16> = "Ember settings".encode_utf16().chain(Some(0)).collect();
-    let hwnd = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
-    if hwnd.is_null() {
+    let Some(hwnd) = settings_window() else {
         return;
-    }
+    };
     unsafe {
         if IsIconic(hwnd) != 0 {
             ShowWindow(hwnd, SW_RESTORE);
@@ -283,7 +302,7 @@ pub fn run(daemon: Handle, config_path: PathBuf) -> Result<()> {
                     width: rect.size.width as i32,
                     height: rect.size.height as i32,
                 });
-                if button == MouseButton::Left {
+                if button == MouseButton::Left && !minimize_settings_window() {
                     actions.push(Action::OpenSettings(anchor));
                 }
             }

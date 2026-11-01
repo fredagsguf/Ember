@@ -227,8 +227,8 @@ $titled.Close()
 Wait-Pumping 3000
 Save-Screen 'desktop-with-tray'
 
-# Clicking the tray icon must bring an open settings window to the front, whether it's
-# minimized or behind another window. The click is real mouse input on the real icon.
+# Clicking the tray icon toggles an open settings window: showing, it's minimized; minimized,
+# it comes back to the front. The click is real mouse input on the real icon.
 function Find-TrayIcon {
     $ua = [System.Windows.Automation.AutomationElement]
     $scope = [System.Windows.Automation.TreeScope]
@@ -272,18 +272,9 @@ if (-not $icon) {
         $settings.Refresh()
     }
     $h = $settings.MainWindowHandle
-    foreach ($case in 'minimized', 'behind') {
-        $cover = $null
-        if ($case -eq 'minimized') {
-            [Win]::ShowWindow($h, 6) | Out-Null # SW_MINIMIZE
-        } else {
-            $cover = New-Object System.Windows.Forms.Form
-            $cover.Text = 'Covering window'
-            $cover.StartPosition = 'Manual'
-            $cover.Bounds = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-            $cover.Show()
-            [Win]::Focus($cover.Handle)
-        }
+    [Win]::Focus($h)
+    # First click: the window is showing, so it goes away. Second click: it comes back.
+    foreach ($case in 'showing', 'minimized') {
         Wait-Pumping 1500
         "clicking {0} at {1}" -f $icon.Current.Name, $icon.Current.BoundingRectangle |
             Add-Content (Join-Path $Out 'tray-click.txt')
@@ -291,9 +282,9 @@ if (-not $icon) {
         Wait-Pumping 2500
         Save-Screen "tray-click-$case"
         $front = [Win]::GetForegroundWindow() -eq $h -and -not [Win]::IsIconic($h)
-        if ($front) { Write-Host "ok: tray click brought the settings window forward ($case)" }
-        else { $failed += "tray click with settings $case" }
-        if ($cover) { $cover.Close() }
+        $ok = if ($case -eq 'showing') { [Win]::IsIconic($h) } else { $front }
+        if ($ok) { Write-Host "ok: tray click with the settings window $case" }
+        else { $failed += "tray click with the settings window $case" }
     }
     Stop-Process $settings -ErrorAction SilentlyContinue
     # The tooltip, while we're here.
