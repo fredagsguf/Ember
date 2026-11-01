@@ -1,8 +1,8 @@
 name: Release
 
-# Push a tag like v0.2.0 (matching the version in Cargo.toml) to build ember.exe
-# and publish them as a GitHub Release. Running it manually builds the zip as a workflow
-# artifact without creating a release.
+# Push a tag like v0.2.0 (matching the version in Cargo.toml) to build Ember for Windows and
+# Linux and publish both as one GitHub Release. Running it manually builds the packages as
+# workflow artifacts without creating a release.
 on:
   push:
     tags: ["v*"]
@@ -36,14 +36,13 @@ jobs:
           } else {
             $label = "v$($crate.version)-dev.$("${{ github.sha }}".Substring(0, 7))"
           }
-          "label=$label" >> $env:GITHUB_OUTPUT
           "name=ember-$label-windows-x64" >> $env:GITHUB_OUTPUT
 
       - name: Test
         run: cargo test --release
 
       - name: Build
-        # Static CRT: the .exe files don't need the Visual C++ redistributable installed.
+        # Static CRT: ember.exe doesn't need the Visual C++ redistributable installed.
         # Explicit --target keeps the flag off build scripts and proc-macros.
         env:
           RUSTFLAGS: -C target-feature=+crt-static
@@ -70,7 +69,6 @@ jobs:
           }
 
       - name: Package
-        id: package
         shell: pwsh
         run: |
           $name = "${{ steps.version.outputs.name }}"
@@ -90,37 +88,117 @@ jobs:
             dist/*.zip
             dist/*.sha256
 
+  linux:
+    # The oldest supported runner, so the binary runs on any distro with glibc 2.35 or newer
+    # (Ubuntu 22.04+, Debian 12+, Fedora 36+, current Arch...).
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libwayland-dev libxkbcommon-dev
+
+      - name: Work out version
+        id: version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 |
+            jq -r '.packages[] | select(.name == "ember") | .version')
+          if [ "${{ github.ref_type }}" = tag ]; then
+            tag="${{ github.ref_name }}"
+            case "$tag" in
+              "v$version" | "v$version-"*) ;;
+              *) echo "Tag $tag does not match Cargo.toml version $version. Bump Cargo.toml first." >&2; exit 1 ;;
+            esac
+            label=$tag
+          else
+            label="v$version-dev.${GITHUB_SHA::7}"
+          fi
+          echo "name=ember-$label-linux-x64" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        run: cargo test --release
+
+      - name: Build
+        run: cargo build --release --bins
+
+      - name: Smoke test
+        run: |
+          ./target/release/ember --version | grep '^ember '
+          ldd target/release/ember
+
+      - name: Package
+        run: |
+          name="${{ steps.version.outputs.name }}"
+          mkdir -p "dist/$name"
+          cp target/release/ember README.md LICENSE config.example.toml contrib/ember.desktop "dist/$name/"
+          cp docs/logo.png "dist/$name/ember.png"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" && cat "$name.tar.gz.sha256")
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.version.outputs.name }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
       - name: Publish GitHub Release
-        if: github.ref_type == 'tag'
-        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "${{ github.ref_name }}"
-          $name = "${{ steps.version.outputs.name }}"
-          $files = "dist/$name.zip", "dist/$name.zip.sha256"
-          @"
-          ## Install (Windows 10/11)
+          tag="${{ github.ref_name }}"
+          win="ember-$tag-windows-x64.zip"
+          linux="ember-$tag-linux-x64.tar.gz"
+          cat > notes.md <<EOF
+          ## Windows 10/11
 
-          1. Download ``$name.zip`` below and extract it anywhere (e.g. ``%LOCALAPPDATA%\Programs\Ember``).
-          2. Run **ember.exe**. Ember appears in the system tray; right-click it for the menu.
+          1. Download \`$win\` below and extract it anywhere (e.g. \`%LOCALAPPDATA%\Programs\Ember\`).
+          2. Run **ember.exe**. Ember appears in the system tray: click it for settings, right-click for the menu.
           3. Optional: tick **Start with Windows** in the tray menu.
 
           **"Windows protected your PC"**: ember.exe isn't code-signed yet, so SmartScreen warns
-          on first launch. Click *More info* → *Run anyway*. You can check the download against the
-          ``.sha256`` file: ``Get-FileHash $name.zip``.
+          on first launch. Click *More info* → *Run anyway*.
 
-          **Warm colours not applying below ~4000K?** Double-click ``enable-full-gamma-range.reg``
-          (needs admin), then sign out and back in. See the README for details.
-          "@ | Out-File -Encoding utf8 notes.md
+          **Warm colours not applying below ~4000K?** Double-click \`enable-full-gamma-range.reg\`
+          (needs admin), then sign out and back in.
 
-          gh release view $tag *> $null
-          if ($LASTEXITCODE -eq 0) {
+          ## Linux (x86-64)
+
+          \`\`\`bash
+          tar -xzf $linux
+          cd ${linux%.tar.gz}
+          install -Dm755 ember ~/.local/bin/ember
+          install -Dm644 ember.desktop ~/.local/share/applications/ember.desktop
+          install -Dm644 ember.png ~/.local/share/icons/hicolor/512x512/apps/ember.png
+          ember
+          \`\`\`
+
+          Needs a desktop with a system tray (StatusNotifierItem). See the README for which desktops are supported.
+
+          Check a download with the \`.sha256\` file next to it (\`sha256sum -c\` on Linux, \`Get-FileHash\` on Windows).
+          EOF
+
+          files=(dist/*)
+          if gh release view "$tag" > /dev/null 2>&1; then
             # Re-run of the workflow for an existing release: replace the assets.
-            gh release upload $tag @files --clobber
-          } else {
-            $flags = @()
-            if ($tag.Contains("-")) { $flags += "--prerelease" }
-            gh release create $tag @files --verify-tag --title "Ember $tag" --notes-file notes.md --generate-notes @flags
-          }
-          if ($LASTEXITCODE -ne 0) { throw "gh release failed" }
+            gh release upload "$tag" "${files[@]}" --clobber
+          else
+            flags=()
+            if [[ "$tag" == *-* ]]; then flags+=(--prerelease); fi
+            gh release create "$tag" "${files[@]}" --verify-tag --title "Ember $tag" \
+              --notes-file notes.md --generate-notes "${flags[@]}"
+          fi

@@ -52,12 +52,18 @@ Warm, dim light in the evening is easier on the eyes and on your sleep. That's w
 
 ### Linux (X11)
 
-There's no prebuilt package yet. Install from source with [Rust](https://rustup.rs):
+Download the latest `ember-vX.Y.Z-linux-x64.tar.gz` from **[Releases](https://github.com/fredagsguf/Ember/releases/latest)** (x86-64, any distro with glibc 2.35 or newer: Ubuntu 22.04+, Debian 12+, Fedora 36+, Arch…) and install it for your user:
 
 ```bash
-cargo install --git https://github.com/fredagsguf/Ember
+tar -xzf ember-v*-linux-x64.tar.gz
+cd ember-v*-linux-x64
+install -Dm755 ember ~/.local/bin/ember
+install -Dm644 ember.desktop ~/.local/share/applications/ember.desktop
+install -Dm644 ember.png ~/.local/share/icons/hicolor/512x512/apps/ember.png
 ember
 ```
+
+Or build it from source with [Rust](https://rustup.rs): `cargo install --git https://github.com/fredagsguf/Ember`.
 
 Ember needs a StatusNotifierItem tray, which KDE, XFCE, Cinnamon, LXQt and waybar have built in. On GNOME, install the *AppIndicator and KStatusNotifierItem Support* extension. The settings window needs OpenGL and `libxkbcommon-x11`, which any normal desktop install has.
 
@@ -109,7 +115,7 @@ Ember is young. Windows 10/11 and Linux on X11 are supported; Wayland and macOS 
 
 - [x] Tray app with per-app rules, timed pause and autostart
 - [x] Settings window with live preview, sunset/sunrise schedule and rule editor
-- [x] Prebuilt Windows releases
+- [x] Prebuilt releases for Windows and Linux
 - [ ] Wayland (wlr-gamma-control for sway/Hyprland; GNOME/KDE night-light integration)
 - [ ] macOS
 - [ ] Global hotkey to toggle
@@ -167,7 +173,7 @@ The logo is drawn in code (`icon_rgba` in `tray_model.rs`). `assets/ember.ico`, 
 1. Bump `version` in `Cargo.toml` and commit.
 2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`
 
-The [Release workflow](.github/workflows/release.yml) checks the tag matches `Cargo.toml`, runs the tests, builds `ember.exe` with a static C runtime, zips it with the README, example config and registry fix, and publishes a GitHub Release with a SHA-256 checksum. Tags with a suffix (`v0.2.0-beta.1`) become pre-releases. Running the workflow manually from the Actions tab builds the zip as a downloadable artifact without releasing.
+The [Release workflow](.github/workflows/release.yml) checks the tag matches `Cargo.toml` and runs the tests on Windows and Linux. It builds `ember.exe` with a static C runtime and zips it with the README, example config and registry fix; builds the Linux binary on Ubuntu 22.04 (for older-glibc compatibility) and packs it with a `.desktop` launcher and icon; then publishes both in one GitHub Release with SHA-256 checksums. Tags with a suffix (`v0.2.0-beta.1`) become pre-releases. Running the workflow manually from the Actions tab builds the zip as a downloadable artifact without releasing.
 
 </details>
 

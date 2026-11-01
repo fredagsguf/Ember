@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Ember
+GenericName=Screen colour temperature
+Comment=Warm your screen at night, true colours while you game
+Exec=ember
+Icon=ember
+Terminal=false
+Categories=Utility;
+Keywords=night;light;blue;flux;redshift;gamma;
