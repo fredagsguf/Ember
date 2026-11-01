@@ -7,8 +7,13 @@
 //! lasts 15 seconds, so it isn't usable for holding a colour all evening.
 //!
 //! Inhibitions belong to our D-Bus connection: KWin drops them if Ember exits or crashes.
+//!
+//! The focused window comes from a small KWin script (`kwin_script.rs`) that reports every
+//! window's PID, native Wayland ones included. If KWin won't run it, XWayland's
+//! `_NET_ACTIVE_WINDOW` still covers X11 apps.
 
 use super::Backend;
+use super::kwin_script;
 use super::x11;
 use crate::color::{ColorSetting, NEUTRAL_K};
 use anyhow::{Context, Result, anyhow, bail};
@@ -28,8 +33,10 @@ pub struct NightLight {
     interface: &'static str,
     /// Held while Night Light is suspended.
     cookie: Option<u32>,
-    /// KWin publishes the active XWayland window (games under Proton/Wine, most Steam games) via
-    /// `_NET_ACTIVE_WINDOW`; native Wayland windows can't be identified.
+    /// Reports the focused window of any kind; `None` if KWin wouldn't run it.
+    script: Option<kwin_script::Script>,
+    /// Fallback: KWin publishes the active XWayland window (games under Proton/Wine, most Steam
+    /// games) via `_NET_ACTIVE_WINDOW`; native Wayland windows can't be identified this way.
     focus: Option<x11::Focus>,
 }
 
@@ -49,6 +56,7 @@ impl NightLight {
                 path,
                 interface,
                 cookie: None,
+                script: None,
                 focus: None,
             };
             match me.property_bool("available") {
@@ -72,15 +80,28 @@ impl NightLight {
             me.focus = match x11::Focus::connect() {
                 Ok(f) => Some(f),
                 Err(e) => {
+                    log::debug!("kwin: no XWayland connection: {e:#}");
+                    None
+                }
+            };
+            me.script = match kwin_script::Script::load(&conn) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    let fallback = if me.focus.is_some() {
+                        "only see X11/XWayland apps"
+                    } else {
+                        "won't work"
+                    };
                     log::warn!(
-                        "kwin: no XWayland connection ({e:#}); rules with when = \"focused\" won't work"
+                        "kwin: couldn't run the focus script ({e:#}); rules with \
+                         when = \"focused\" {fallback}"
                     );
                     None
                 }
             };
             log::info!(
                 "kwin: driving KWin Night Light via {interface}. Colours and schedule come from \
-                 System Settings; \"focused\" rules only see X11/XWayland apps"
+                 System Settings"
             );
             return Ok(me);
         }
@@ -141,6 +162,10 @@ impl Backend for NightLight {
     }
 
     fn focused_pid(&mut self) -> Option<u32> {
+        // Once the script has reported, it knows about every window, XWayland ones included.
+        if let Some(reported) = self.script.as_ref().and_then(|s| s.focused_pid()) {
+            return reported;
+        }
         self.focus.as_ref()?.focused_pid()
     }
 

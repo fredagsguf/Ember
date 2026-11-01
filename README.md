@@ -78,12 +78,12 @@ What works depends on your session. Ember picks the right method by itself, and 
 |---|---|---|---|---|
 | X11, any desktop | RandR gamma ramps | process name | ✓ | Everything works |
 | Wayland: sway, Hyprland, river, Wayfire, labwc and other wlroots compositors | `wlr-gamma-control` | the window's **app_id** | — | Only one program can own the gamma, so quit gammastep/wlsunset first |
-| Wayland: KDE Plasma 5.18+ | KDE's own Night Light | process name of X11/XWayland apps | — | See below |
+| Wayland: KDE Plasma 5.18+ | KDE's own Night Light | process name | — | See below |
 | Wayland: GNOME | not possible | — | — | GNOME doesn't let apps change the colours; use its built-in Night Light |
 
 The toggle hotkey needs X11 for now; on Wayland, pause and resume from the tray menu.
 
-**KDE Plasma on Wayland.** KWin doesn't let apps set colours, so Ember works through KDE's Night Light. Turn it on in *System Settings → Display & Monitor → Night Light* and pick the colour and times there. Ember then switches Night Light off while a rule disables Ember, while Ember is paused, and during the day by Ember's own schedule (set Ember's schedule to *always night* to leave the timing entirely to KDE). Ember's temperature and brightness sliders, and rules that set a custom colour, have no effect there, and the settings window can't preview. Focused rules see apps running through XWayland, which includes most games (Steam, Proton, Wine), but not native Wayland windows.
+**KDE Plasma on Wayland.** KWin doesn't let apps set colours, so Ember works through KDE's Night Light. Turn it on in *System Settings → Display & Monitor → Night Light* and pick the colour and times there. Ember then switches Night Light off while a rule disables Ember, while Ember is paused, and during the day by Ember's own schedule (set Ember's schedule to *always night* to leave the timing entirely to KDE). Ember's temperature and brightness sliders, and rules that set a custom colour, have no effect there, and the settings window can't preview. Focused rules match the process name of any window, native Wayland and XWayland (Steam, Proton, Wine) alike: Ember loads a small KWin script that tells it which window is focused. If KWin scripting is unavailable, focused rules only see XWayland apps.
 
 ## Settings
 
@@ -185,7 +185,7 @@ cargo test
 cargo clippy --all-targets
 ```
 
-Layout: `src/lib.rs` is the library; `src/bin/ember/` is the tray app (`windows.rs` uses `tray-icon`, `linux.rs` uses `ksni`, `settings.rs` is the egui settings window). Library pieces: `daemon.rs` (run loop, single-instance lock), `tray_model.rs` (menu state, actions, icon drawing), `autostart.rs`, `color.rs` (Kelvin → RGB → gamma ramp), `solar.rs` (sun elevation), `schedule.rs`, `rules.rs` (per-app matching), `engine.rs` (decision + process watching), `hotkey.rs` (parsing the toggle hotkey; registering it is per platform in `windows.rs`/`linux.rs`), `gamma/` (platform backends: `windows.rs` GDI, `x11.rs` RandR, `wlroots.rs` wlr-gamma-control and foreign-toplevel, `kwin.rs` KDE Night Light over D-Bus, `calibration.rs` keeping each display's calibration curve; `gamma::open` picks one using `session.rs`).
+Layout: `src/lib.rs` is the library; `src/bin/ember/` is the tray app (`windows.rs` uses `tray-icon`, `linux.rs` uses `ksni`, `settings.rs` is the egui settings window). Library pieces: `daemon.rs` (run loop, single-instance lock), `tray_model.rs` (menu state, actions, icon drawing), `autostart.rs`, `color.rs` (Kelvin → RGB → gamma ramp), `solar.rs` (sun elevation), `schedule.rs`, `rules.rs` (per-app matching), `engine.rs` (decision + process watching), `hotkey.rs` (parsing the toggle hotkey; registering it is per platform in `windows.rs`/`linux.rs`), `gamma/` (platform backends: `windows.rs` GDI, `x11.rs` RandR, `wlroots.rs` wlr-gamma-control and foreign-toplevel, `kwin.rs` KDE Night Light over D-Bus, `kwin_script.rs` focused window via a KWin script, `calibration.rs` keeping each display's calibration curve; `gamma::open` picks one using `session.rs`).
 
 The logo is drawn in code (`icon_rgba` in `tray_model.rs`). `assets/ember.ico`, embedded in the exe, is generated from it with `cargo run --example make_ico`.
 

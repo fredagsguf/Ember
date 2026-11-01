@@ -7,6 +7,8 @@ pub mod calibration;
 #[cfg(target_os = "linux")]
 mod kwin;
 #[cfg(target_os = "linux")]
+mod kwin_script;
+#[cfg(target_os = "linux")]
 mod session;
 #[cfg(windows)]
 mod windows;
