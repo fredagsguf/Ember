@@ -4,6 +4,7 @@
 use crate::daemon::{Handle, State};
 use crate::engine::{self, Reason};
 use crate::hotkey::Hotkey;
+use crate::schedule::NextChange;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
@@ -65,6 +66,8 @@ pub const DISABLE_OPTIONS: &[(u64, &str)] = &[(15, "15 minutes"), (60, "1 hour")
 pub struct View {
     /// e.g. "3400K — night" or "Off — rule: Counter-Strike 2"
     pub status: String,
+    /// What the schedule does next, e.g. "Back to day at 07:02".
+    pub next: Option<String>,
     pub tooltip: String,
     /// Ember is tinting the screen right now (drives the icon colour).
     pub active: bool,
@@ -95,6 +98,7 @@ pub fn view(state: &State) -> View {
     match state {
         State::Starting => View {
             status: "Starting…".into(),
+            next: None,
             tooltip: "Ember".into(),
             active: false,
             enabled,
@@ -104,6 +108,7 @@ pub fn view(state: &State) -> View {
         },
         State::Failed(e) => View {
             status: format!("Error: {}", truncate(e, 60)),
+            next: None,
             tooltip: format!("Ember — error: {e}"),
             active: false,
             enabled,
@@ -130,9 +135,20 @@ pub fn view(state: &State) -> View {
                     s.config.has_disable_rule(app),
                 )
             });
+            let next = match s.reason {
+                Reason::Schedule | Reason::Rule(_) => {
+                    crate::schedule::next_change(&s.config, chrono::Local::now())
+                        .map(next_change_text)
+                }
+                Reason::Paused | Reason::Preview => None,
+            };
             View {
-                tooltip: format!("Ember — {status}"),
+                tooltip: match &next {
+                    Some(n) => format!("Ember — {status}\n{n}"),
+                    None => format!("Ember — {status}"),
+                },
                 status,
+                next,
                 active: k != crate::color::NEUTRAL_K,
                 enabled,
                 app_rule,
@@ -140,6 +156,16 @@ pub fn view(state: &State) -> View {
                 hotkey,
             }
         }
+    }
+}
+
+fn next_change_text(c: NextChange) -> String {
+    let hm = |t: chrono::DateTime<chrono::Local>| t.format("%H:%M").to_string();
+    match c {
+        NextChange::WarmsAt(t) => format!("Warming up at {}", hm(t)),
+        NextChange::CoolsAt(t) => format!("Back to day at {}", hm(t)),
+        NextChange::WarmingUntil(t) => format!("Warming up until {}", hm(t)),
+        NextChange::CoolingUntil(t) => format!("Back to day by {}", hm(t)),
     }
 }
 
@@ -363,6 +389,22 @@ mod tests {
         assert_eq!(a.to_string().parse::<Anchor>(), Ok(a));
         assert!("1,2,3".parse::<Anchor>().is_err());
         assert!("1,2,3,x".parse::<Anchor>().is_err());
+    }
+
+    #[test]
+    fn next_change_reads_naturally() {
+        use chrono::TimeZone;
+        let t = chrono::Local
+            .with_ymd_and_hms(2026, 11, 6, 7, 2, 0)
+            .unwrap();
+        assert_eq!(
+            next_change_text(NextChange::CoolsAt(t)),
+            "Back to day at 07:02"
+        );
+        assert_eq!(
+            next_change_text(NextChange::WarmsAt(t)),
+            "Warming up at 07:02"
+        );
     }
 
     #[test]

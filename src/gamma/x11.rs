@@ -4,8 +4,8 @@
 //! (at most once every [`CHECK_EVERY`]), so a calibration curve loaded after Ember started
 //! (xcalib, dispwin, the desktop's colour manager) is picked up.
 
-use super::Backend;
 use super::calibration::Calibration;
+use super::{Backend, FocusedWindow};
 use crate::color::{ColorSetting, Ramp};
 use crate::config::{self, Display};
 use anyhow::{Context, Result};
@@ -23,6 +23,10 @@ pub struct Focus {
     root: Window,
     net_active_window: Atom,
     net_wm_pid: Atom,
+    net_wm_name: Atom,
+    utf8_string: Atom,
+    net_wm_state: Atom,
+    net_wm_state_fullscreen: Atom,
 }
 
 impl Focus {
@@ -33,11 +37,19 @@ impl Focus {
         let atom = |n: &[u8]| -> Result<Atom> { Ok(conn.intern_atom(false, n)?.reply()?.atom) };
         let net_active_window = atom(b"_NET_ACTIVE_WINDOW")?;
         let net_wm_pid = atom(b"_NET_WM_PID")?;
+        let net_wm_name = atom(b"_NET_WM_NAME")?;
+        let utf8_string = atom(b"UTF8_STRING")?;
+        let net_wm_state = atom(b"_NET_WM_STATE")?;
+        let net_wm_state_fullscreen = atom(b"_NET_WM_STATE_FULLSCREEN")?;
         Ok(Focus {
             conn,
             root,
             net_active_window,
             net_wm_pid,
+            net_wm_name,
+            utf8_string,
+            net_wm_state,
+            net_wm_state_fullscreen,
         })
     }
 
@@ -51,12 +63,43 @@ impl Focus {
         reply.value32()?.next()
     }
 
-    pub fn focused_pid(&self) -> Option<u32> {
+    fn active_window(&self) -> Option<Window> {
         let win = self.property_u32(self.root, self.net_active_window, AtomEnum::WINDOW)?;
-        if win == 0 {
-            return None;
-        }
-        self.property_u32(win, self.net_wm_pid, AtomEnum::CARDINAL)
+        (win != 0).then_some(win)
+    }
+
+    pub fn focused_pid(&self) -> Option<u32> {
+        self.property_u32(self.active_window()?, self.net_wm_pid, AtomEnum::CARDINAL)
+    }
+
+    /// Title from `_NET_WM_NAME` (UTF-8), else the older `WM_NAME`; fullscreen from
+    /// `_NET_WM_STATE`.
+    pub fn focused_window(&self) -> FocusedWindow {
+        let Some(win) = self.active_window() else {
+            return FocusedWindow::default();
+        };
+        let text = |prop: Atom, ty: Atom| {
+            let reply = self
+                .conn
+                .get_property(false, win, prop, ty, 0, 1024)
+                .ok()?
+                .reply()
+                .ok()?;
+            let s = String::from_utf8_lossy(&reply.value).into_owned();
+            (!s.is_empty()).then_some(s)
+        };
+        let title = text(self.net_wm_name, self.utf8_string)
+            .or_else(|| text(AtomEnum::WM_NAME.into(), AtomEnum::STRING.into()));
+        let fullscreen = self
+            .conn
+            .get_property(false, win, self.net_wm_state, AtomEnum::ATOM, 0, 64)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .is_some_and(|r| {
+                r.value32()
+                    .is_some_and(|mut v| v.any(|a| a == self.net_wm_state_fullscreen))
+            });
+        FocusedWindow { title, fullscreen }
     }
 }
 
@@ -255,5 +298,9 @@ impl Backend for RandR {
 
     fn focused_pid(&mut self) -> Option<u32> {
         self.focus.focused_pid()
+    }
+
+    fn focused_window(&mut self) -> FocusedWindow {
+        self.focus.focused_window()
     }
 }

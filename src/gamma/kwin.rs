@@ -13,6 +13,7 @@
 //! `_NET_ACTIVE_WINDOW` still covers X11 apps.
 
 use super::Backend;
+use super::FocusedWindow;
 use super::kwin_script;
 use super::x11;
 use crate::color::{ColorSetting, NEUTRAL_K};
@@ -167,6 +168,16 @@ impl Backend for NightLight {
             return reported;
         }
         self.focus.as_ref()?.focused_pid()
+    }
+
+    fn focused_window(&mut self) -> FocusedWindow {
+        if let Some(reported) = self.script.as_ref().and_then(|s| s.focused_window()) {
+            return reported;
+        }
+        self.focus
+            .as_ref()
+            .map(|f| f.focused_window())
+            .unwrap_or_default()
     }
 
     /// Slider values can't be shown on screen: KWin picks the colour itself.

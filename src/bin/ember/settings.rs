@@ -4,13 +4,32 @@
 use anyhow::{Result, anyhow};
 use eframe::egui::{self, Color32, CornerRadius, RichText, SliderClamping, Stroke, Ui};
 use ember::color::{self, ColorSetting};
-use ember::config::{self, Config, Rule, ScheduleMode, When};
+use ember::config::{self, Config, DayTimes, Rule, ScheduleMode, When};
 use ember::hotkey::Hotkey;
 use ember::tray_model::Anchor;
 use ember::{engine, gamma, schedule, tray_model};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
+
+const DAY_NAMES: [&str; 7] = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+];
+
+/// A sunset/sunrise offset as the slider shows it.
+fn offset_text(minutes: f64) -> String {
+    match minutes as i64 {
+        0 => "as the sun says".into(),
+        m if m > 0 => format!("{m} min later"),
+        m => format!("{} min earlier", -m),
+    }
+}
 
 /// Wait this long after the last edit before writing the file.
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(400);
@@ -84,6 +103,8 @@ struct SettingsApp {
     message: Option<(String, bool)>, // (text, is_error)
     /// Comma-separated process lists, one per rule (kept separately so typing "a, " works).
     proc_text: Vec<String>,
+    /// Each rule's window titles, as typed (comma-separated).
+    title_text: Vec<String>,
     backend: Option<Box<dyn gamma::Backend>>,
     /// Dragging a slider shows on screen, through `backend` or the running tray app.
     preview_works: bool,
@@ -390,6 +411,7 @@ impl SettingsApp {
             path,
             saved: cfg.clone(),
             proc_text: Vec::new(),
+            title_text: Vec::new(),
             cfg,
             last_edit: None,
             message,
@@ -419,6 +441,7 @@ impl SettingsApp {
             .iter()
             .map(|r| r.processes.join(", "))
             .collect();
+        self.title_text = self.cfg.rules.iter().map(|r| r.titles.join(", ")).collect();
     }
 
     fn refresh_running_apps(&mut self) {
@@ -457,10 +480,10 @@ impl SettingsApp {
             return;
         }
         self.last_edit = None;
-        // A rule that's still being filled in (no process names yet) shouldn't block saving
-        // everything else; it's kept in the window and saved once it has a process.
+        // A rule that's still being filled in (nothing to match yet) shouldn't block saving
+        // everything else; it's kept in the window and saved once it has a condition.
         let mut to_save = self.cfg.clone();
-        to_save.rules.retain(|r| !r.processes.is_empty());
+        to_save.rules.retain(Rule::has_conditions);
         if to_save == self.saved {
             return;
         }
@@ -813,6 +836,36 @@ impl eframe::App for SettingsApp {
                                 ui.add(egui::Slider::new(&mut s.transition_minutes, 0..=180).suffix(" min"));
                                 ui.end_row();
                             });
+                            let any_days = (0..7).any(|i| s.days.get(i).is_some());
+                            egui::CollapsingHeader::new("Different times on some days")
+                                .default_open(any_days)
+                                .show(ui, |ui| {
+                                    let (start, end) = (s.night_start.clone(), s.night_end.clone());
+                                    egui::Grid::new("days").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+                                        for (i, day) in DAY_NAMES.iter().enumerate() {
+                                            let times = s.days.get_mut(i);
+                                            let mut own = times.is_some();
+                                            if ui.checkbox(&mut own, format!("{day} night")).changed() {
+                                                *times = own.then(|| DayTimes {
+                                                    night_start: start.clone(),
+                                                    night_end: end.clone(),
+                                                });
+                                            }
+                                            ui.horizontal(|ui| match times {
+                                                Some(t) => {
+                                                    time_edit(ui, &format!("day-start-{i}"), &mut t.night_start);
+                                                    ui.label("to");
+                                                    time_edit(ui, &format!("day-end-{i}"), &mut t.night_end);
+                                                }
+                                                None => {
+                                                    ui.weak(format!("{start} to {end}"));
+                                                }
+                                            });
+                                            ui.end_row();
+                                        }
+                                    });
+                                    ui.weak("A night belongs to the evening it starts on: Friday night ends on Saturday morning.");
+                                });
                         }
                         ScheduleMode::Solar => {
                             if s.latitude.is_none() || s.longitude.is_none() {
@@ -852,11 +905,20 @@ impl eframe::App for SettingsApp {
                                 ui.end_row();
                             });
                             ui.weak("Pick a city or enter coordinates (north and east are positive). Ember never uses the network.");
+                            egui::Grid::new("offsets").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                                let range = -config::MAX_SOLAR_OFFSET..=config::MAX_SOLAR_OFFSET;
+                                ui.label("Start the evening");
+                                ui.add(egui::Slider::new(&mut s.sunset_offset_minutes, range.clone()).custom_formatter(|v, _| offset_text(v)));
+                                ui.end_row();
+                                ui.label("Start the morning");
+                                ui.add(egui::Slider::new(&mut s.sunrise_offset_minutes, range).custom_formatter(|v, _| offset_text(v)));
+                                ui.end_row();
+                            });
                             let (lat, lon) = (s.latitude.unwrap_or(0.0), s.longitude.unwrap_or(0.0));
                             if lat == 0.0 && lon == 0.0 {
                                 ui.colored_label(palette::EMBER_HOT, "Set your location to get correct sunset times.");
                             }
-                            let t = schedule::solar_times(lat, lon, chrono::Local::now().date_naive());
+                            let t = schedule::schedule_solar_times(s, chrono::Local::now().date_naive());
                             let fmt = |p: Option<(chrono::NaiveTime, chrono::NaiveTime)>| {
                                 p.map(|(a, b)| format!("{} to {}", a.format("%H:%M"), b.format("%H:%M")))
                                     .unwrap_or_else(|| "none today".into())
@@ -867,11 +929,55 @@ impl eframe::App for SettingsApp {
                             ui.weak("The night settings are used all the time.");
                         }
                     }
+
+                    ui.add_space(6.0);
+                    let mut bedtime = !s.bedtime.trim().is_empty();
+                    ui.horizontal(|ui| {
+                        if ui.checkbox(&mut bedtime, "Bedtime: go warmer still from").changed() {
+                            s.bedtime = if bedtime { "23:00".into() } else { String::new() };
+                        }
+                        if bedtime {
+                            time_edit(ui, "bedtime", &mut s.bedtime);
+                        }
+                    });
+                    if bedtime {
+                        let c = &mut self.cfg.color;
+                        egui::Grid::new("bedtime").num_columns(3).spacing([12.0, 10.0]).show(ui, |ui| {
+                            let bed = |c: &config::Color| ColorSetting { temperature: c.bedtime_temperature, brightness: c.bedtime_brightness };
+                            ui.label("Bedtime temperature");
+                            let (_, d) = kelvin_slider(ui, &mut c.bedtime_temperature, 1200..=6500);
+                            if d {
+                                preview = Some(bed(c));
+                            }
+                            swatch(ui, bed(c));
+                            ui.end_row();
+                            ui.label("Bedtime brightness");
+                            let (_, d) = percent_slider(ui, &mut c.bedtime_brightness);
+                            if d {
+                                preview = Some(bed(c));
+                            }
+                            ui.label("");
+                            ui.end_row();
+                        });
+                        ui.weak("Fades in over half an hour and lasts until morning.");
+                    }
                 });
 
                 // ── Apps & games ───────────────────────────────────────
                 section(ui, "Apps & games", |ui| {
                     ui.weak("Ember turns off (or uses a different colour) while these apps are in use. First match wins.");
+                    ui.add_space(6.0);
+                    for (label, preset) in Rule::presets() {
+                        let mut on = self.cfg.rules.contains(&preset);
+                        if ui.checkbox(&mut on, label).changed() {
+                            if on {
+                                self.cfg.rules.push(preset);
+                            } else {
+                                self.cfg.rules.retain(|r| *r != preset);
+                            }
+                            self.sync_proc_text();
+                        }
+                    }
                     ui.add_space(6.0);
                     let mut remove = None;
                     for (i, rule) in self.cfg.rules.iter_mut().enumerate() {
@@ -882,7 +988,7 @@ impl eframe::App for SettingsApp {
                                 .inner_margin(8.0)
                                 .show(ui, |ui| {
                                     ui.set_width(ui.available_width());
-                                    rule_editor(ui, rule, &mut self.proc_text[i], &mut preview, &mut remove, i);
+                                    rule_editor(ui, rule, &mut self.proc_text[i], &mut self.title_text[i], &mut preview, &mut remove, i);
                                 });
                         });
                         ui.add_space(4.0);
@@ -890,6 +996,7 @@ impl eframe::App for SettingsApp {
                     if let Some(i) = remove {
                         self.cfg.rules.remove(i);
                         self.proc_text.remove(i);
+                        self.title_text.remove(i);
                     }
 
                     ui.add_space(4.0);
@@ -912,10 +1019,10 @@ impl eframe::App for SettingsApp {
                                 name: (!app.is_empty()).then(|| app.clone()),
                                 processes: if app.is_empty() { vec![] } else { vec![app.clone()] },
                                 when: When::Focused,
-                                temperature: None,
-                                brightness: None,
+                                ..Rule::default()
                             });
                             self.proc_text.push(app);
+                            self.title_text.push(String::new());
                         }
                     });
                 });
@@ -956,6 +1063,10 @@ impl eframe::App for SettingsApp {
                         ui.label("Fade when an app rule switches");
                         ui.add(egui::Slider::new(&mut g.fade_secs, 0.0..=3.0).suffix(" s").fixed_decimals(1));
                         ui.end_row();
+                        ui.label("Ease in after a jump");
+                        ui.add(egui::Slider::new(&mut g.jump_fade_minutes, 0.0..=config::MAX_JUMP_FADE_MINUTES).suffix(" min").fixed_decimals(0))
+                            .on_hover_text("When Ember starts in the evening or the PC wakes from sleep, fade into the right colour over this long instead of switching at once. 0 = at once.");
+                        ui.end_row();
                         ui.label("Check apps every");
                         ui.add(egui::Slider::new(&mut g.poll_interval_secs, 1..=10).suffix(" s"));
                         ui.end_row();
@@ -990,14 +1101,29 @@ impl eframe::App for SettingsApp {
         });
 
         // Process lists are edited as text; turn them back into the config.
-        for (rule, text) in self.cfg.rules.iter_mut().zip(&self.proc_text) {
-            let parsed: Vec<String> = text
-                .split(',')
+        let list = |text: &str| -> Vec<String> {
+            text.split(',')
                 .map(|p| p.trim().to_string())
                 .filter(|p| !p.is_empty())
-                .collect();
-            if rule.processes != parsed {
-                rule.processes = parsed;
+                .collect()
+        };
+        for ((rule, procs), titles) in self
+            .cfg
+            .rules
+            .iter_mut()
+            .zip(&self.proc_text)
+            .zip(&self.title_text)
+        {
+            let (procs, titles) = (list(procs), list(titles));
+            if rule.processes != procs {
+                rule.processes = procs;
+            }
+            if rule.titles != titles {
+                rule.titles = titles;
+            }
+            // Titles and fullscreen are about the active window.
+            if rule.fullscreen || !rule.titles.is_empty() {
+                rule.when = When::Focused;
             }
         }
 
@@ -1042,6 +1168,7 @@ fn rule_editor(
     ui: &mut Ui,
     rule: &mut Rule,
     procs: &mut String,
+    titles: &mut String,
     preview: &mut Option<ColorSetting>,
     remove: &mut Option<usize>,
     i: usize,
@@ -1075,8 +1202,25 @@ fn rule_editor(
             .on_hover_text("Comma-separated. Case doesn't matter and \".exe\" is optional.");
             ui.end_row();
 
+            ui.label("Window title");
+            ui.add(
+                egui::TextEdit::singleline(titles)
+                    .hint_text("optional, e.g. YouTube, Netflix")
+                    .desired_width(f32::INFINITY),
+            )
+            .on_hover_text("Only while the active window's title contains one of these. Comma-separated, case doesn't matter.");
+            ui.end_row();
+
+            ui.label("Only for");
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut rule.fullscreen, "fullscreen windows");
+                ui.checkbox(&mut rule.steam_games, "Steam games");
+            });
+            ui.end_row();
+
             ui.label("Applies");
-            egui::ComboBox::from_id_salt("when")
+            let window_only = rule.fullscreen || !titles.trim().is_empty();
+            ui.add_enabled_ui(!window_only, |ui| egui::ComboBox::from_id_salt("when")
                 .selected_text(match rule.when {
                     When::Focused => "while it's the active window",
                     When::Running => "while it's running",
@@ -1088,7 +1232,9 @@ fn rule_editor(
                         "while it's the active window",
                     );
                     ui.selectable_value(&mut rule.when, When::Running, "while it's running");
-                });
+                }))
+            .response
+            .on_disabled_hover_text("Window titles and fullscreen are about the active window.");
             ui.end_row();
 
             ui.label("Action");
@@ -1140,8 +1286,15 @@ fn rule_editor(
                 ui.end_row();
             }
         });
-    if rule.processes.is_empty() {
-        ui.colored_label(palette::EMBER_HOT, "Add at least one process name.");
+    if rule.processes.is_empty()
+        && titles.trim().is_empty()
+        && !rule.fullscreen
+        && !rule.steam_games
+    {
+        ui.colored_label(
+            palette::EMBER_HOT,
+            "Add a process or a window title, or tick fullscreen or Steam games.",
+        );
     }
 }
 

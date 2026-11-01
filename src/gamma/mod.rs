@@ -51,11 +51,23 @@ pub trait Backend {
     fn focused_app_id(&mut self) -> Option<String> {
         None
     }
+    /// Title and fullscreen state of the focused window, where the platform can tell.
+    fn focused_window(&mut self) -> FocusedWindow {
+        FocusedWindow::default()
+    }
     /// Whether `apply` shows exactly the colour asked for, so the settings window can preview
     /// slider values with it. False when the desktop picks the colour itself (KDE Night Light).
     fn live_preview(&self) -> bool {
         true
     }
+}
+
+/// What title/fullscreen rules look at.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FocusedWindow {
+    pub title: Option<String>,
+    /// The window covers its whole screen (a fullscreen or borderless-fullscreen game).
+    pub fullscreen: bool,
 }
 
 /// Backend that only logs. Useful for testing rules without touching the display.

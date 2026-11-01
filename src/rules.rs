@@ -3,6 +3,8 @@
 use crate::color::ColorSetting;
 use crate::config::{Rule, When};
 use std::collections::HashSet;
+use std::ffi::OsString;
+use std::path::Path;
 
 /// Normalise a process name for comparison: lowercase, no ".exe" suffix, no path.
 pub fn normalize(name: &str) -> String {
@@ -22,6 +24,49 @@ pub struct Snapshot {
     pub running: HashSet<String>,
     /// Normalised name of the process owning the foreground window, if known.
     pub focused: Option<String>,
+    /// Title of the foreground window, if known.
+    pub title: Option<String>,
+    /// The foreground window covers its whole screen.
+    pub fullscreen: bool,
+    /// The foreground window belongs to a game started by Steam.
+    pub steam_focused: bool,
+    /// A game started by Steam is running.
+    pub steam_running: bool,
+}
+
+/// Steam's own processes, which live next to its games but aren't one.
+const STEAM_CLIENT: &[&str] = &[
+    "steam",
+    "steamwebhelper",
+    "steamservice",
+    "steamerrorreporter",
+    "gameoverlayui",
+    "gameoverlayui64",
+    // Compiles a game's shaders in the background, with that game's SteamAppId.
+    "fossilize_replay",
+];
+
+/// Is this process (normalised `name`, executable path, environment) a game started by Steam?
+/// Games are installed under `steamapps/common`, and Steam gives what it launches a
+/// `SteamAppId` (or, for non-Steam shortcuts, `SteamGameId`). The environment catches Proton
+/// games inside Steam's container, whose executable path the host can't see.
+pub fn is_steam_game(name: &str, exe: Option<&Path>, environ: &[OsString]) -> bool {
+    if STEAM_CLIENT.contains(&name) {
+        return false;
+    }
+    let installed = exe.is_some_and(|p| {
+        p.to_string_lossy()
+            .replace('\\', "/")
+            .to_lowercase()
+            .contains("/steamapps/common/")
+    });
+    let launched = environ.iter().any(|v| {
+        let v = v.to_string_lossy();
+        v.strip_prefix("SteamAppId=")
+            .or_else(|| v.strip_prefix("SteamGameId="))
+            .is_some_and(|id| !id.is_empty() && id != "0")
+    });
+    installed || launched
 }
 
 /// Linux truncates process names (`comm`) to 15 bytes.
@@ -33,17 +78,50 @@ fn name_matches(pattern: &str, actual: &str) -> bool {
 }
 
 pub fn matching_rule<'a>(rules: &'a [Rule], snap: &Snapshot) -> Option<&'a Rule> {
-    rules.iter().find(|rule| {
-        rule.processes
-            .iter()
-            .map(|p| normalize(p))
-            .any(|p| match rule.when {
-                When::Running => {
-                    snap.running.contains(&p) || snap.running.iter().any(|r| name_matches(&p, r))
-                }
-                When::Focused => snap.focused.as_deref().is_some_and(|f| name_matches(&p, f)),
-            })
-    })
+    rules.iter().find(|rule| matches(rule, snap))
+}
+
+/// Every kind of condition the rule sets must hold; within a list, any entry will do.
+fn matches(rule: &Rule, snap: &Snapshot) -> bool {
+    if !rule.has_conditions() {
+        return false;
+    }
+    let focused = rule.when == When::Focused;
+    let mut procs = rule
+        .processes
+        .iter()
+        .map(|p| normalize(p))
+        .filter(|p| !p.is_empty())
+        .peekable();
+    if procs.peek().is_some()
+        && !procs.any(|p| {
+            if focused {
+                snap.focused.as_deref().is_some_and(|f| name_matches(&p, f))
+            } else {
+                snap.running.contains(&p) || snap.running.iter().any(|r| name_matches(&p, r))
+            }
+        })
+    {
+        return false;
+    }
+    let mut titles = rule.titles().peekable();
+    if titles.peek().is_some() {
+        let Some(title) = snap.title.as_deref().map(str::to_lowercase) else {
+            return false;
+        };
+        if !titles.any(|t| title.contains(&t.to_lowercase())) {
+            return false;
+        }
+    }
+    if rule.fullscreen && !(focused && snap.fullscreen) {
+        return false;
+    }
+    let steam = if focused {
+        snap.steam_focused
+    } else {
+        snap.steam_running
+    };
+    !rule.steam_games || steam
 }
 
 /// The colour a matching rule wants. No overrides at all means "disable Ember".
@@ -63,12 +141,114 @@ mod tests {
 
     fn rule(names: &[&str], when: When) -> Rule {
         Rule {
-            name: None,
             processes: names.iter().map(|s| s.to_string()).collect(),
             when,
-            temperature: None,
-            brightness: None,
+            ..Rule::default()
         }
+    }
+
+    fn focused(name: &str, title: &str) -> Snapshot {
+        Snapshot {
+            focused: Some(name.into()),
+            title: Some(title.into()),
+            ..Snapshot::default()
+        }
+    }
+
+    #[test]
+    fn title_rule_matches_text_in_the_title() {
+        let r = Rule {
+            titles: vec!["YouTube".into(), "Netflix".into()],
+            ..Rule::default()
+        };
+        let rules = vec![r];
+        assert!(
+            matching_rule(
+                &rules,
+                &focused("firefox", "Lofi - youtube — Mozilla Firefox")
+            )
+            .is_some()
+        );
+        assert!(matching_rule(&rules, &focused("firefox", "GitHub — Mozilla Firefox")).is_none());
+        assert!(matching_rule(&rules, &Snapshot::default()).is_none());
+    }
+
+    #[test]
+    fn processes_and_titles_must_both_match() {
+        let mut r = rule(&["firefox"], When::Focused);
+        r.titles = vec!["YouTube".into()];
+        let rules = vec![r];
+        assert!(matching_rule(&rules, &focused("firefox", "Video - YouTube")).is_some());
+        assert!(matching_rule(&rules, &focused("chrome", "Video - YouTube")).is_none());
+        assert!(matching_rule(&rules, &focused("firefox", "Mail")).is_none());
+    }
+
+    #[test]
+    fn fullscreen_rule_needs_a_fullscreen_focused_window() {
+        let r = Rule {
+            fullscreen: true,
+            ..Rule::default()
+        };
+        let rules = vec![r];
+        let mut snap = focused("game", "Game");
+        assert!(matching_rule(&rules, &snap).is_none());
+        snap.fullscreen = true;
+        assert!(matching_rule(&rules, &snap).is_some());
+    }
+
+    #[test]
+    fn steam_rule_follows_when() {
+        let focused_rule = Rule {
+            steam_games: true,
+            ..Rule::default()
+        };
+        let running_rule = Rule {
+            when: When::Running,
+            ..focused_rule.clone()
+        };
+        let snap = Snapshot {
+            steam_running: true,
+            ..Snapshot::default()
+        };
+        assert!(matching_rule(std::slice::from_ref(&focused_rule), &snap).is_none());
+        assert!(matching_rule(std::slice::from_ref(&running_rule), &snap).is_some());
+        let snap = Snapshot {
+            steam_focused: true,
+            ..Snapshot::default()
+        };
+        assert!(matching_rule(&[focused_rule], &snap).is_some());
+    }
+
+    #[test]
+    fn rule_without_conditions_never_matches() {
+        assert!(matching_rule(&[Rule::default()], &focused("x", "y")).is_none());
+    }
+
+    #[test]
+    fn steam_games_are_found_by_path_or_environment() {
+        let env = |v: &[&str]| v.iter().map(OsString::from).collect::<Vec<_>>();
+        let win = Path::new(
+            r"C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive\game\bin\win64\cs2.exe",
+        );
+        assert!(is_steam_game("cs2", Some(win), &[]));
+        let linux = Path::new("/home/me/.local/share/Steam/steamapps/common/Hades/Hades");
+        assert!(is_steam_game("hades", Some(linux), &[]));
+        assert!(is_steam_game(
+            "wine64-preloader",
+            None,
+            &env(&["HOME=/home/me", "SteamAppId=1145360"])
+        ));
+        assert!(!is_steam_game(
+            "bash",
+            Some(Path::new("/usr/bin/bash")),
+            &env(&["SteamAppId=0"])
+        ));
+        let client = Path::new(r"C:\Program Files (x86)\Steam\steam.exe");
+        assert!(!is_steam_game(
+            "steam",
+            Some(client),
+            &env(&["SteamAppId=1145360"])
+        ));
     }
 
     #[test]

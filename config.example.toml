@@ -8,12 +8,15 @@ poll_interval_secs = 2   # how often to check running games and re-apply colours
 fade_secs = 0.5          # fade when a rule switches on/off (0 = instant)
 preserve_calibration = true # keep your display's calibration curve (ICC/VCGT) under the tint
 toggle_hotkey = "Ctrl+Alt+End" # pause/resume from anywhere, e.g. "Ctrl+Shift+F12"; "" = off
+jump_fade_minutes = 7    # ease in when starting in the evening or waking from sleep (0 = instant)
 
 [color]
 day_temperature = 6500   # Kelvin; 6500 = no tint
 night_temperature = 3400 # lower = warmer/redder (1000..10000)
 day_brightness = 1.0     # 0.1..1.0
 night_brightness = 1.0
+bedtime_temperature = 2700 # from schedule.bedtime on
+bedtime_brightness = 1.0
 
 [schedule]
 # "fixed"        – use night_start / night_end below
@@ -25,6 +28,15 @@ night_end = "07:00"
 transition_minutes = 45
 # latitude = 59.91
 # longitude = 10.75
+# sunset_offset_minutes = 30   # solar: start the evening 30 min after the sun says (negative = earlier)
+# sunrise_offset_minutes = 0   # solar: same for the morning
+bedtime = ""             # e.g. "23:00": go to the bedtime colour until morning ("" = off)
+
+# Fixed mode: other times for some nights, by the day the night starts on
+# (mon, tue, wed, thu, fri, sat, sun). Friday night ends on Saturday morning.
+# [schedule.days]
+# fri = { night_start = "23:30", night_end = "09:00" }
+# sat = { night_start = "23:30", night_end = "09:00" }
 
 # ---------------------------------------------------------------------------
 # Per-application rules. The first matching rule wins.
@@ -32,8 +44,16 @@ transition_minutes = 45
 #   processes   – process names; case-insensitive, ".exe" optional. On wlroots
 #                 Wayland compositors (sway, Hyprland…) "focused" rules match the
 #                 window's app_id instead, e.g. "steam_app_730" or "org.mozilla.firefox"
+#   titles      – text in the active window's title, e.g. ["YouTube", "Netflix"]
+#   fullscreen  – true: only while the active window fills its screen
+#   steam_games – true: games started by Steam
 #   when        – "focused" (default): only while the app is in the foreground
-#                 "running": as long as the process exists
+#                 "running": as long as the process exists (processes and
+#                 steam_games only)
+#
+# A rule needs at least one of processes, titles, fullscreen or steam_games.
+# With several, all must hold: processes = ["firefox"] plus titles = ["YouTube"]
+# is YouTube in Firefox. Within one list, any entry will do.
 #   temperature / brightness – override values. Leave both out to fully
 #                 disable Ember while the rule matches.
 # ---------------------------------------------------------------------------
@@ -42,6 +62,18 @@ transition_minutes = 45
 name = "Counter-Strike 2"
 processes = ["cs2"]
 when = "focused"
+
+# [[rules]]
+# name = "Any fullscreen game"
+# fullscreen = true
+
+# [[rules]]
+# name = "Steam games"
+# steam_games = true
+
+# [[rules]]
+# name = "YouTube and Netflix"
+# titles = ["YouTube", "Netflix"]
 
 # [[rules]]
 # name = "Photo editing"

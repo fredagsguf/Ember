@@ -71,7 +71,10 @@ impl ksni::Tray for EmberTray {
     fn tool_tip(&self) -> ksni::ToolTip {
         ksni::ToolTip {
             title: "Ember".into(),
-            description: self.view.status.clone(),
+            description: match &self.view.next {
+                Some(n) => format!("{}\n{n}", self.view.status),
+                None => self.view.status.clone(),
+            },
             ..Default::default()
         }
     }
