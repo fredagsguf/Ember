@@ -25,9 +25,10 @@ pub fn run(config_path: PathBuf, anchor: Option<Anchor>) -> Result<()> {
     std::fs::create_dir_all(config::state_dir())?;
     let lock = File::create(&lock_path)?;
     if lock.try_lock().is_err() {
-        log::info!("settings window already open");
-        return Ok(());
+        log::info!("settings window already open; bringing it to the front");
+        return request_show(anchor);
     }
+    let _ = std::fs::remove_file(show_request_path()); // left over from a crash
 
     let icon = egui::IconData {
         rgba: tray_model::icon_rgba(64, true),
@@ -52,6 +53,7 @@ pub fn run(config_path: PathBuf, anchor: Option<Anchor>) -> Result<()> {
             options,
             Box::new(|cc| {
                 apply_theme(&cc.egui_ctx);
+                watch_show_requests(cc.egui_ctx.clone());
                 Ok(Box::new(app))
             }),
         )
@@ -83,6 +85,8 @@ struct SettingsApp {
     /// Comma-separated process lists, one per rule (kept separately so typing "a, " works).
     proc_text: Vec<String>,
     backend: Option<Box<dyn gamma::Backend>>,
+    /// Dragging a slider shows on screen, through `backend` or the running tray app.
+    preview_works: bool,
     previewing: Option<ColorSetting>,
     last_preview_write: Option<Instant>,
     running_apps: Vec<String>,
@@ -141,6 +145,46 @@ const CITIES: &[(&str, f64, f64)] = &[
     ("Vancouver", 49.28, -123.12),
     ("Warsaw", 52.23, 21.01),
 ];
+
+/// Written by a second `ember --settings` (the tray icon clicked again) to ask the open window
+/// to come to the front, next to the icon in the anchor it contains (if any).
+fn show_request_path() -> PathBuf {
+    config::state_dir().join("settings.show")
+}
+
+fn request_show(anchor: Option<Anchor>) -> Result<()> {
+    // We were started by a click, so Windows lets us hand our right to take the foreground to
+    // the open window; without this it would only flash in the taskbar.
+    #[cfg(windows)]
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(
+            windows_sys::Win32::UI::WindowsAndMessaging::ASFW_ANY,
+        );
+    }
+    let text = anchor.map(|a| a.to_string()).unwrap_or_default();
+    std::fs::write(show_request_path(), text)?;
+    Ok(())
+}
+
+/// Takes a pending show request: `Some(anchor)` if there is one.
+fn take_show_request() -> Option<Option<Anchor>> {
+    let path = show_request_path();
+    let text = std::fs::read_to_string(&path).ok()?;
+    let _ = std::fs::remove_file(&path);
+    Some(text.trim().parse().ok())
+}
+
+/// The window only repaints every second when idle, so wake it as soon as a request arrives.
+fn watch_show_requests(ctx: egui::Context) {
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_millis(150));
+            if show_request_path().exists() {
+                ctx.request_repaint();
+            }
+        }
+    });
+}
 
 fn mtime(p: &Path) -> Option<SystemTime> {
     std::fs::metadata(p).and_then(|m| m.modified()).ok()
@@ -312,17 +356,24 @@ impl SettingsApp {
             ),
         };
         // Same calibration handling as the tray app, so previewing doesn't wipe the curve.
+        let mut desktop_picks_colour = false;
         let backend = match gamma::open(false, cfg.general.preserve_calibration) {
             Ok(b) if b.live_preview() => Some(b),
             Ok(b) => {
                 log::info!("live preview unavailable with the {} backend", b.name());
+                desktop_picks_colour = true;
                 None
             }
             Err(e) => {
-                log::warn!("live preview unavailable: {e:#}");
+                log::info!("no gamma control of our own: {e:#}");
                 None
             }
         };
+        // Without gamma control of its own (on wlroots only one program can have it, and the
+        // tray app does), the running Ember still shows the preview: it applies what we send
+        // with `engine::set_preview`.
+        let preview_works =
+            backend.is_some() || (!desktop_picks_colour && ember::daemon::is_running());
         let mut me = SettingsApp {
             file_mtime: mtime(&path),
             path,
@@ -332,6 +383,7 @@ impl SettingsApp {
             last_edit: None,
             message,
             backend,
+            preview_works,
             previewing: None,
             last_preview_write: None,
             running_apps: Vec::new(),
@@ -608,6 +660,13 @@ impl eframe::App for SettingsApp {
                 move_next_to(&ctx, a);
             }
         }
+        if let Some(anchor) = take_show_request() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            if let Some(a) = anchor {
+                move_next_to(&ctx, a);
+            }
+        }
         self.reload_if_changed_on_disk();
         let before = self.cfg.clone();
         let mut preview: Option<ColorSetting> = None;
@@ -642,7 +701,7 @@ impl eframe::App for SettingsApp {
                     });
                 });
                 ui.add_space(2.0);
-                if self.backend.is_some() {
+                if self.preview_works {
                     ui.weak("Drag a slider to preview it on screen.");
                 } else {
                     ui.weak("Live preview isn't available on this display server.");

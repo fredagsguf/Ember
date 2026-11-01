@@ -108,10 +108,27 @@ pub fn spawn(opts: Options) -> Result<(Handle, JoinHandle<Result<()>>)> {
 }
 
 /// Only one Ember may drive the displays at a time, otherwise they fight over the gamma ramp.
+fn lock_path() -> PathBuf {
+    config::state_dir().join("ember.lock")
+}
+
+/// Whether Ember (the tray app) is running, i.e. another process holds the instance lock.
+pub fn is_running() -> bool {
+    let Ok(f) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path())
+    else {
+        return false;
+    };
+    matches!(f.try_lock(), Err(std::fs::TryLockError::WouldBlock))
+}
+
 fn single_instance_lock() -> Result<File> {
-    let dir = config::state_dir();
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("ember.lock");
+    std::fs::create_dir_all(config::state_dir())?;
+    let path = lock_path();
     let f = File::create(&path).with_context(|| format!("creating {}", path.display()))?;
     match f.try_lock() {
         Ok(()) => Ok(f),
