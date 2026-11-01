@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 $Exe = (Resolve-Path $Exe).Path
-Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing, UIAutomationClient, UIAutomationTypes
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -19,6 +19,15 @@ public static class Win {
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] public static extern void mouse_event(uint flags, int dx, int dy, int data, UIntPtr extra);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    // The window's visible frame, without the invisible resize borders GetWindowRect includes.
+    [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out RECT r, int size);
+    public static RECT Frame(IntPtr h) {
+        RECT r;
+        DwmGetWindowAttribute(h, 9, out r, Marshal.SizeOf(typeof(RECT))); // DWMWA_EXTENDED_FRAME_BOUNDS
+        return r;
+    }
+    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
     // Windows only lets the foreground process hand out focus; a tap of Alt counts as input
     // and lifts that restriction.
     public static void Focus(IntPtr h) {
@@ -121,6 +130,61 @@ longitude = 12.57
 sunset_offset_minutes = 30
 "@
 
+# The README's screenshot: the top of the settings window beside its Apps & games section.
+function Save-ReadmeScreenshot {
+    $cfg = Write-Config 'readme' @"
+[[rules]]
+name = "Counter-Strike 2"
+processes = ["cs2"]
+"@
+    $p = Start-Process $Exe -ArgumentList '--settings', '-c', "`"$cfg`"" -PassThru
+    for ($i = 0; $i -lt 30 -and $p.MainWindowTitle -ne 'Ember settings'; $i++) {
+        Start-Sleep 1
+        $p.Refresh()
+    }
+    if ($p.MainWindowTitle -ne 'Ember settings') {
+        $script:failed += 'settings window (readme)'
+        return
+    }
+    $h = $p.MainWindowHandle
+    Start-Sleep 3
+    [Win]::Focus($h)
+    Start-Sleep 1
+    $grab = {
+        $r = [Win]::Frame($h)
+        # The window can be taller than the runner's screen; stop at the taskbar.
+        $bottom = [Math]::Min($r.Bottom, [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea.Bottom)
+        $bmp = New-Object System.Drawing.Bitmap ($r.Right - $r.Left), ($bottom - $r.Top)
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $g.CopyFromScreen($r.Left, $r.Top, 0, 0, $bmp.Size)
+        $g.Dispose()
+        $bmp
+    }
+    $top = & $grab
+    $r = [Win]::Frame($h)
+    [Win]::SetCursorPos([int](($r.Left + $r.Right) / 2), [int](($r.Top + $r.Bottom) / 2)) | Out-Null
+    for ($k = 0; $k -lt 3; $k++) {
+        [Win]::mouse_event(0x0800, 0, 0, -480, [UIntPtr]::Zero)
+        Start-Sleep -Milliseconds 400
+    }
+    [Win]::SetCursorPos(0, 0) | Out-Null # no hover highlight in the picture
+    Start-Sleep 1
+    $rules = & $grab
+    Stop-Process $p
+    $gap = 24
+    $picture = New-Object System.Drawing.Bitmap ($top.Width + $gap + $rules.Width), ([Math]::Max($top.Height, $rules.Height))
+    $g = [System.Drawing.Graphics]::FromImage($picture)
+    $g.Clear([System.Drawing.Color]::Transparent)
+    $g.DrawImage($top, 0, 0, $top.Width, $top.Height)
+    $g.DrawImage($rules, $top.Width + $gap, 0, $rules.Width, $rules.Height)
+    $g.Dispose()
+    $picture.Save((Join-Path $Out 'readme-settings.png'), [System.Drawing.Imaging.ImageFormat]::Png)
+    $picture.Dispose()
+    $top.Dispose()
+    $rules.Dispose()
+}
+Save-ReadmeScreenshot
+
 # Rules against real windows: a window with a matching title, then one covering the screen.
 $cfg = Write-Config 'rules' @"
 [general]
@@ -162,6 +226,83 @@ $full.Close()
 $titled.Close()
 Wait-Pumping 3000
 Save-Screen 'desktop-with-tray'
+
+# Clicking the tray icon must bring an open settings window to the front, whether it's
+# minimized or behind another window. The click is real mouse input on the real icon.
+function Find-TrayIcon {
+    $ua = [System.Windows.Automation.AutomationElement]
+    $scope = [System.Windows.Automation.TreeScope]
+    $named = { param($e) $e.Current.Name -match '^Ember( —|$)' }
+    $taskbar = $ua::RootElement.FindFirst($scope::Children,
+        (New-Object System.Windows.Automation.PropertyCondition $ua::ClassNameProperty, 'Shell_TrayWnd'))
+    if ($taskbar) {
+        $all = $taskbar.FindAll($scope::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+        # What the taskbar holds and where, to see what the test clicks.
+        $all | ForEach-Object {
+            $c = $_.Current
+            "{0} | {1} | {2} | {3}" -f $c.Name, $c.ClassName, $c.AutomationId, $c.BoundingRectangle
+        } | Set-Content (Join-Path $Out 'taskbar-elements.txt')
+        foreach ($e in $all) { if (& $named $e) { return $e } }
+    }
+    $null
+}
+
+function Click-At([System.Windows.Rect] $r) {
+    [Win]::SetCursorPos([int]($r.X + $r.Width / 2), [int]($r.Y + $r.Height / 2)) | Out-Null
+    Start-Sleep -Milliseconds 300
+    [Win]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero) # left down
+    [Win]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero) # left up
+}
+
+# Windows 11 tucks new tray icons behind the ^; promote ours onto the taskbar.
+Get-ChildItem 'HKCU:\Control Panel\NotifyIconSettings' -ErrorAction SilentlyContinue | ForEach-Object {
+    if ((Get-ItemProperty $_.PSPath).ExecutablePath -like '*ember.exe') {
+        Set-ItemProperty $_.PSPath -Name IsPromoted -Value 1 -Type DWord
+    }
+}
+Start-Sleep 3
+$icon = Find-TrayIcon
+if (-not $icon) {
+    Save-Screen 'tray-icon-not-found'
+    $failed += 'tray icon not found'
+} else {
+    $settings = Start-Process $Exe -ArgumentList '--settings', '-c', "`"$cfg`"" -PassThru
+    for ($i = 0; $i -lt 30 -and $settings.MainWindowTitle -ne 'Ember settings'; $i++) {
+        Start-Sleep 1
+        $settings.Refresh()
+    }
+    $h = $settings.MainWindowHandle
+    foreach ($case in 'minimized', 'behind') {
+        $cover = $null
+        if ($case -eq 'minimized') {
+            [Win]::ShowWindow($h, 6) | Out-Null # SW_MINIMIZE
+        } else {
+            $cover = New-Object System.Windows.Forms.Form
+            $cover.Text = 'Covering window'
+            $cover.StartPosition = 'Manual'
+            $cover.Bounds = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+            $cover.Show()
+            [Win]::Focus($cover.Handle)
+        }
+        Wait-Pumping 1500
+        "clicking {0} at {1}" -f $icon.Current.Name, $icon.Current.BoundingRectangle |
+            Add-Content (Join-Path $Out 'tray-click.txt')
+        Click-At $icon.Current.BoundingRectangle
+        Wait-Pumping 2500
+        Save-Screen "tray-click-$case"
+        $front = [Win]::GetForegroundWindow() -eq $h -and -not [Win]::IsIconic($h)
+        if ($front) { Write-Host "ok: tray click brought the settings window forward ($case)" }
+        else { $failed += "tray click with settings $case" }
+        if ($cover) { $cover.Close() }
+    }
+    Stop-Process $settings -ErrorAction SilentlyContinue
+    # The tooltip, while we're here.
+    $r = $icon.Current.BoundingRectangle
+    [Win]::SetCursorPos([int]($r.X + $r.Width / 2), [int]($r.Y + $r.Height / 2)) | Out-Null
+    Wait-Pumping 2500
+    Save-Screen 'tray-tooltip'
+}
+
 Stop-Process $ember
 Start-Sleep 1
 

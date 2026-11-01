@@ -47,6 +47,8 @@ pub struct Status {
     pub last_app: Option<String>,
     pub config: Config,
     pub backend: &'static str,
+    /// Windows refused the last warm colour (see `Backend::warm_colours_refused`).
+    pub warm_refused: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -274,6 +276,7 @@ fn run_locked(opts: &Options, rx: Receiver<Msg>, state: &Mutex<State>) -> Result
                 last_app: last_app.clone(),
                 config: cfg.clone(),
                 backend: backend.name(),
+                warm_refused: backend.warm_colours_refused(),
             }));
         }
 

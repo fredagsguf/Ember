@@ -13,6 +13,8 @@ mod kwin_script;
 pub mod session;
 #[cfg(windows)]
 mod windows;
+#[cfg(windows)]
+pub use windows::{allow_full_gamma_range, full_gamma_range_allowed};
 #[cfg(target_os = "linux")]
 mod wlroots;
 #[cfg(target_os = "linux")]
@@ -54,6 +56,11 @@ pub trait Backend {
     /// Title and fullscreen state of the focused window, where the platform can tell.
     fn focused_window(&mut self) -> FocusedWindow {
         FocusedWindow::default()
+    }
+    /// Windows refused the last warm colour: it limits how far apps may move the gamma ramp
+    /// (to roughly 4000K) until `GdiIcmGammaRange` is set. See [`allow_full_gamma_range`].
+    fn warm_colours_refused(&self) -> bool {
+        false
     }
     /// Whether `apply` shows exactly the colour asked for, so the settings window can preview
     /// slider values with it. False when the desktop picks the colour itself (KDE Night Light).
