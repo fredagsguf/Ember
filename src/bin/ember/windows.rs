@@ -17,12 +17,31 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, UnregisterHotKey, VIRTUAL_KEY,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, MB_ICONERROR, MB_OK, MSG, MessageBoxW, MsgWaitForMultipleObjects, PM_REMOVE,
-    PeekMessageW, QS_ALLINPUT, TranslateMessage, WM_HOTKEY, WM_QUIT,
+    DispatchMessageW, FindWindowW, IsIconic, MB_ICONERROR, MB_OK, MSG, MessageBoxW,
+    MsgWaitForMultipleObjects, PM_REMOVE, PeekMessageW, QS_ALLINPUT, SW_RESTORE,
+    SetForegroundWindow, ShowWindow, TranslateMessage, WM_HOTKEY, WM_QUIT,
 };
 
 /// Our only `RegisterHotKey` id; `WM_HOTKEY` carries it in `wParam`.
 const HOTKEY_ID: i32 = 1;
+
+/// Bring an open settings window to the front, restoring it if it's minimized. The tray process
+/// does this itself because the click gave it the right to take the foreground: asked by the
+/// short-lived second `ember --settings`, the window would at most flash in the taskbar, and
+/// while minimized it doesn't even run to see the request.
+fn raise_settings_window() {
+    let title: Vec<u16> = "Ember settings".encode_utf16().chain(Some(0)).collect();
+    let hwnd = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
+    if hwnd.is_null() {
+        return;
+    }
+    unsafe {
+        if IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_RESTORE);
+        }
+        SetForegroundWindow(hwnd);
+    }
+}
 
 pub fn message_box(text: &str) {
     let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
@@ -246,6 +265,11 @@ pub fn run(daemon: Handle, config_path: PathBuf) -> Result<()> {
             actions.extend(action_for(ev.id(), anchor));
         }
         for action in actions {
+            if matches!(action, Action::OpenSettings(_)) {
+                // Still start `ember --settings`: it opens the window if there is none, and
+                // otherwise asks the open one to move next to the icon.
+                raise_settings_window();
+            }
             match tray_model::perform(action, &daemon, &config_path) {
                 Ok(true) => return Ok(()),
                 Ok(false) => {}
