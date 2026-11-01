@@ -175,6 +175,11 @@ function Find-TrayIcon {
         (New-Object System.Windows.Automation.PropertyCondition $ua::ClassNameProperty, 'Shell_TrayWnd'))
     if ($taskbar) {
         $all = $taskbar.FindAll($scope::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+        # What the taskbar holds and where, to see what the test clicks.
+        $all | ForEach-Object {
+            $c = $_.Current
+            "{0} | {1} | {2} | {3}" -f $c.Name, $c.ClassName, $c.AutomationId, $c.BoundingRectangle
+        } | Set-Content (Join-Path $Out 'taskbar-elements.txt')
         foreach ($e in $all) { if (& $named $e) { return $e } }
     }
     $null
@@ -218,6 +223,8 @@ if (-not $icon) {
             [Win]::Focus($cover.Handle)
         }
         Wait-Pumping 1500
+        "clicking {0} at {1}" -f $icon.Current.Name, $icon.Current.BoundingRectangle |
+            Add-Content (Join-Path $Out 'tray-click.txt')
         Click-At $icon.Current.BoundingRectangle
         Wait-Pumping 2500
         Save-Screen "tray-click-$case"
