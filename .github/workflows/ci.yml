@@ -1,8 +1,11 @@
 name: CI
 
-# Run by hand (Actions → CI → Run workflow) on any branch; releases build and test on their own.
+# Run by hand (Actions → CI → Run workflow) on any branch, or by pushing a `ci/…` branch.
+# Releases build and test on their own.
 on:
   workflow_dispatch:
+  push:
+    branches: ["ci/**"]
 
 jobs:
   windows:
