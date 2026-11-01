@@ -5,22 +5,29 @@
 //!
 //! Windows refuses ramps that deviate "too far" from identity (roughly below ~3400-4000K)
 //! unless HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ICM\GdiIcmGammaRange (DWORD) = 256.
-//! `ember` reports a hint when that happens; see README.
+//! When that happens the tray and the settings window offer to set it
+//! ([`allow_full_gamma_range`]); it takes effect after signing out and back in.
 
 use super::calibration::Calibration;
 use super::{Backend, FocusedWindow};
 use crate::color::{ColorSetting, Ramp};
 use crate::config::{self, Display as DisplayConfig};
 use anyhow::{Result, bail};
-use std::ptr::null;
-use windows_sys::Win32::Foundation::{HWND, RECT};
+use std::ptr::{null, null_mut};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_CANCELLED, ERROR_SUCCESS, GetLastError, HWND, RECT,
+};
 use windows_sys::Win32::Graphics::Gdi::{
     CreateDCW, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, DISPLAY_DEVICEW, DeleteDC, EnumDisplayDevicesW,
     GetMonitorInfoW, HDC, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
 };
+use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RegGetValueW};
+use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
 use windows_sys::Win32::UI::ColorSystem::{GetDeviceGammaRamp, SetDeviceGammaRamp};
+use windows_sys::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
+    SW_HIDE,
 };
 
 type GdiRamp = [u16; 3 * 256];
@@ -38,6 +45,76 @@ pub struct Gdi {
     calibration: Calibration,
     settings: Vec<DisplayConfig>,
     warned_range: bool,
+    /// The last warm colour was refused, and no warm colour has worked since.
+    refused_warm: bool,
+}
+
+const ICM_KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ICM";
+const GAMMA_RANGE: &str = "GdiIcmGammaRange";
+/// The `GdiIcmGammaRange` value that lifts the limit (f.lux sets the same).
+const FULL_RANGE: u32 = 256;
+/// Below this, a ramp that Windows accepts shows the limit isn't in the way.
+const WARM_K: u32 = 4000;
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(Some(0)).collect()
+}
+
+/// Is `GdiIcmGammaRange` set so that apps may make the screen warmer than about 4000K?
+/// (It takes effect only after signing out and back in.)
+pub fn full_gamma_range_allowed() -> bool {
+    let (key, value) = (wide(ICM_KEY), wide(GAMMA_RANGE));
+    let mut data = 0u32;
+    let mut size = size_of::<u32>() as u32;
+    let r = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_DWORD,
+            null_mut(),
+            (&mut data as *mut u32).cast(),
+            &mut size,
+        )
+    };
+    r == ERROR_SUCCESS && data == FULL_RANGE
+}
+
+/// Set `GdiIcmGammaRange` through Windows' admin prompt (it lives in HKLM). `Ok(false)` if the
+/// prompt was declined.
+pub fn allow_full_gamma_range() -> Result<bool> {
+    let verb = wide("runas");
+    let file = wide("reg.exe");
+    let params = wide(&format!(
+        r#"add "HKLM\{ICM_KEY}" /v {GAMMA_RANGE} /t REG_DWORD /d {FULL_RANGE} /f"#
+    ));
+    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    info.cbSize = size_of::<SHELLEXECUTEINFOW>() as u32;
+    info.fMask = SEE_MASK_NOCLOSEPROCESS;
+    info.lpVerb = verb.as_ptr();
+    info.lpFile = file.as_ptr();
+    info.lpParameters = params.as_ptr();
+    info.nShow = SW_HIDE;
+    if unsafe { ShellExecuteExW(&mut info) } == 0 {
+        if unsafe { GetLastError() } == ERROR_CANCELLED {
+            return Ok(false);
+        }
+        bail!(
+            "couldn't start reg.exe: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    let mut code = 1u32;
+    unsafe {
+        WaitForSingleObject(info.hProcess, 30_000);
+        GetExitCodeProcess(info.hProcess, &mut code);
+        CloseHandle(info.hProcess);
+    }
+    if code != 0 || !full_gamma_range_allowed() {
+        bail!("reg.exe couldn't set {GAMMA_RANGE} (exit code {code})");
+    }
+    log::info!("{GAMMA_RANGE} set to {FULL_RANGE}; takes effect after signing out and back in");
+    Ok(true)
 }
 
 fn wide_to_string(w: &[u16]) -> String {
@@ -119,6 +196,7 @@ impl Gdi {
             calibration,
             settings: Vec::new(),
             warned_range: false,
+            refused_warm: false,
         })
     }
 }
@@ -146,12 +224,19 @@ impl Backend for Gdi {
                 self.calibration.wrote(&d.name, ramp);
             }
         }
+        if failed.is_empty() {
+            if setting.temperature < WARM_K {
+                self.refused_warm = false;
+            }
+        } else if setting != ColorSetting::NEUTRAL {
+            self.refused_warm = true;
+        }
         if !failed.is_empty() {
             if !self.warned_range {
                 self.warned_range = true;
                 log::warn!(
                     "Windows rejected the gamma ramp for {failed:?} at {}K. If this happens only at low \
-                     temperatures, set the registry value GdiIcmGammaRange=256 (see README) and sign out/in.",
+                     temperatures, \"Allow warmer colours\" in the tray menu fixes it.",
                     setting.temperature
                 );
             }
@@ -184,6 +269,10 @@ impl Backend for Gdi {
                 (d.name.clone(), label)
             })
             .collect()
+    }
+
+    fn warm_colours_refused(&self) -> bool {
+        self.refused_warm
     }
 
     fn focused_pid(&mut self) -> Option<u32> {

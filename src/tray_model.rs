@@ -78,6 +78,8 @@ pub struct View {
     pub autostart: bool,
     /// The configured pause/resume hotkey, shown next to "Enabled".
     pub hotkey: Option<Hotkey>,
+    /// Windows refuses warm colours until it's allowed to show them.
+    pub warm_refused: bool,
 }
 
 /// The pause/resume hotkey in the config the daemon is running with. `None` until the daemon
@@ -105,6 +107,7 @@ pub fn view(state: &State) -> View {
             app_rule: None,
             autostart,
             hotkey,
+            warm_refused: false,
         },
         State::Failed(e) => View {
             status: format!("Error: {}", truncate(e, 60)),
@@ -115,6 +118,7 @@ pub fn view(state: &State) -> View {
             app_rule: None,
             autostart,
             hotkey,
+            warm_refused: false,
         },
         State::Running(s) => {
             let k = s.setting.temperature;
@@ -154,6 +158,7 @@ pub fn view(state: &State) -> View {
                 app_rule,
                 autostart,
                 hotkey,
+                warm_refused: s.warm_refused,
             }
         }
     }

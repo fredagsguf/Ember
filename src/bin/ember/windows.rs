@@ -17,9 +17,9 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, UnregisterHotKey, VIRTUAL_KEY,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, FindWindowW, IsIconic, MB_ICONERROR, MB_OK, MSG, MessageBoxW,
-    MsgWaitForMultipleObjects, PM_REMOVE, PeekMessageW, QS_ALLINPUT, SW_RESTORE,
-    SetForegroundWindow, ShowWindow, TranslateMessage, WM_HOTKEY, WM_QUIT,
+    DispatchMessageW, FindWindowW, IsIconic, MB_ICONERROR, MB_ICONINFORMATION, MB_OK,
+    MESSAGEBOX_STYLE, MSG, MessageBoxW, MsgWaitForMultipleObjects, PM_REMOVE, PeekMessageW,
+    QS_ALLINPUT, SW_RESTORE, SetForegroundWindow, ShowWindow, TranslateMessage, WM_HOTKEY, WM_QUIT,
 };
 
 /// Our only `RegisterHotKey` id; `WM_HOTKEY` carries it in `wParam`.
@@ -43,17 +43,41 @@ fn raise_settings_window() {
     }
 }
 
+/// Set `GdiIcmGammaRange` through Windows' admin prompt and say what happens next.
+fn allow_warmer_colours() {
+    match ember::gamma::allow_full_gamma_range() {
+        Ok(true) => info_box(
+            "Done. Sign out of Windows and back in, and Ember can make your screen warmer than \
+             about 4000K.",
+        ),
+        Ok(false) => {} // the admin prompt was declined
+        Err(e) => message_box(&format!("Couldn't allow warmer colours: {e:#}")),
+    }
+}
+
+/// The tray menu entry for warm colours Windows refuses, or `None` while it has nothing to say.
+fn warm_label(refused: bool) -> Option<(&'static str, bool)> {
+    if !refused {
+        None
+    } else if ember::gamma::full_gamma_range_allowed() {
+        Some(("Sign out and back in to allow warmer colours", false))
+    } else {
+        Some(("Allow warmer colours…", true))
+    }
+}
+
 pub fn message_box(text: &str) {
+    show_box(text, MB_ICONERROR);
+}
+
+fn info_box(text: &str) {
+    show_box(text, MB_ICONINFORMATION);
+}
+
+fn show_box(text: &str, icon: MESSAGEBOX_STYLE) {
     let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
     let (t, c) = (wide(text), wide("Ember"));
-    unsafe {
-        MessageBoxW(
-            std::ptr::null_mut(),
-            t.as_ptr(),
-            c.as_ptr(),
-            MB_OK | MB_ICONERROR,
-        )
-    };
+    unsafe { MessageBoxW(std::ptr::null_mut(), t.as_ptr(), c.as_ptr(), MB_OK | icon) };
 }
 
 fn virtual_key(key: Key) -> VIRTUAL_KEY {
@@ -172,6 +196,9 @@ pub fn run(daemon: Handle, config_path: PathBuf) -> Result<()> {
     let settings = MenuItem::new("Settings…", true, None);
     let open_cfg = MenuItem::new("Open config file", true, None);
     let quit = MenuItem::new("Quit Ember", true, None);
+    // Only in the menu while Windows refuses warm colours; see `warm_label`.
+    let warm = MenuItem::new("Allow warmer colours…", true, None);
+    let mut warm_shown = false;
 
     let menu = Menu::new();
     menu.append_items(&[
@@ -190,7 +217,7 @@ pub fn run(daemon: Handle, config_path: PathBuf) -> Result<()> {
 
     // Left-click opens the settings window above the icon; right-click shows the menu.
     let tray = TrayIconBuilder::new()
-        .with_menu(Box::new(menu))
+        .with_menu(Box::new(menu.clone()))
         .with_menu_on_left_click(false)
         .with_tooltip("Ember")
         .with_icon(icon(false)?)
@@ -262,6 +289,11 @@ pub fn run(daemon: Handle, config_path: PathBuf) -> Result<()> {
             }
         }
         while let Ok(ev) = MenuEvent::receiver().try_recv() {
+            if ev.id() == warm.id() {
+                allow_warmer_colours();
+                last = None;
+                continue;
+            }
             actions.extend(action_for(ev.id(), anchor));
         }
         for action in actions {
@@ -298,6 +330,20 @@ pub fn run(daemon: Handle, config_path: PathBuf) -> Result<()> {
                     app.set_checked(false);
                     app.set_enabled(false);
                 }
+            }
+            match warm_label(v.warm_refused) {
+                Some((label, enabled)) => {
+                    warm.set_text(label);
+                    warm.set_enabled(enabled);
+                    if !warm_shown {
+                        // Right under the status line, which says why the screen isn't warmer.
+                        warm_shown = menu.insert(&warm, 1).is_ok();
+                    }
+                }
+                None if warm_shown => {
+                    warm_shown = menu.remove(&warm).is_err();
+                }
+                None => {}
             }
             let _ = tray.set_tooltip(Some(&v.tooltip));
             if last.as_ref().is_none_or(|l| l.active != v.active) {

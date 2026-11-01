@@ -1,6 +1,0 @@
-Windows Registry Editor Version 5.00
-
-; Lets SetDeviceGammaRamp apply warm temperatures below ~4000K.
-; f.lux sets the same value. Sign out and back in (or reboot) after importing.
-[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ICM]
-"GdiIcmGammaRange"=dword:00000100

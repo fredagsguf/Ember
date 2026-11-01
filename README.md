@@ -54,7 +54,7 @@ Warm, dim light in the evening is easier on the eyes and on your sleep. That's w
 
 `ember.exe` isn't code-signed yet, so the first launch shows *"Windows protected your PC"*. Click **More info → Run anyway**. Each release has a `.sha256` file you can check with `Get-FileHash`.
 
-**Warm colours not going below ~4000K?** Windows limits how warm apps can make the screen until a registry value is set (f.lux sets the same one). Double-click `enable-full-gamma-range.reg` from the zip (needs admin), then sign out and back in.
+**Warm colours stop at ~4000K?** Windows limits how warm apps can make the screen until a setting is changed (f.lux changes the same one). When Ember runs into the limit, the tray menu shows **Allow warmer colours…**; it asks for admin rights once, then sign out and back in. It's also under Settings → Advanced. To do it by hand, run `reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ICM" /v GdiIcmGammaRange /t REG_DWORD /d 256 /f` in an admin terminal.
 
 ### Linux
 

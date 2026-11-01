@@ -1079,6 +1079,21 @@ impl eframe::App for SettingsApp {
                     }
                     ui.checkbox(&mut self.cfg.general.preserve_calibration, "Keep my display's calibration curve")
                         .on_hover_text("Tint on top of the ICC/VCGT curve loaded by your calibration software, and put it back when Ember turns off. Untick to reset to neutral instead.");
+                    #[cfg(windows)]
+                    ui.horizontal(|ui| {
+                        if gamma::full_gamma_range_allowed() {
+                            ui.weak("Windows allows colours warmer than 4000 K.");
+                        } else {
+                            ui.label("Windows limits colours to about 4000 K.");
+                            if ui.button("Allow warmer colours…").on_hover_text("Asks for admin rights once to change a Windows setting (f.lux changes the same one).").clicked() {
+                                match gamma::allow_full_gamma_range() {
+                                    Ok(true) => self.message = Some(("Done. Sign out of Windows and back in for warmer colours.".into(), false)),
+                                    Ok(false) => {}
+                                    Err(e) => self.message = Some((format!("{e:#}"), true)),
+                                }
+                            }
+                        }
+                    });
                     ui.horizontal(|ui| {
                         if ui.button("Open config file").clicked() {
                             let _ = config::ensure_exists(&self.path);
