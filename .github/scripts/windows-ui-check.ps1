@@ -170,14 +170,14 @@ processes = ["cs2"]
     $rules = & $grab
     Stop-Process $p
     $gap = 24
-    $out = New-Object System.Drawing.Bitmap ($top.Width + $gap + $rules.Width), ([Math]::Max($top.Height, $rules.Height))
-    $g = [System.Drawing.Graphics]::FromImage($out)
+    $picture = New-Object System.Drawing.Bitmap ($top.Width + $gap + $rules.Width), ([Math]::Max($top.Height, $rules.Height))
+    $g = [System.Drawing.Graphics]::FromImage($picture)
     $g.Clear([System.Drawing.Color]::Transparent)
     $g.DrawImage($top, 0, 0, $top.Width, $top.Height)
     $g.DrawImage($rules, $top.Width + $gap, 0, $rules.Width, $rules.Height)
     $g.Dispose()
-    $out.Save((Join-Path $Out 'readme-settings.png'), [System.Drawing.Imaging.ImageFormat]::Png)
-    $out.Dispose()
+    $picture.Save((Join-Path $Out 'readme-settings.png'), [System.Drawing.Imaging.ImageFormat]::Png)
+    $picture.Dispose()
     $top.Dispose()
     $rules.Dispose()
 }
