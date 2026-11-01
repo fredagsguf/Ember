@@ -25,6 +25,9 @@ pub struct General {
     pub poll_interval_secs: u64,
     /// Seconds to fade when switching between rule/normal state. 0 = instant.
     pub fade_secs: f64,
+    /// Tint on top of each display's calibration curve (ICC/VCGT) and restore it on exit,
+    /// instead of replacing it with a neutral ramp.
+    pub preserve_calibration: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -101,6 +104,7 @@ impl Default for General {
         General {
             poll_interval_secs: 2,
             fade_secs: 0.5,
+            preserve_calibration: true,
         }
     }
 }
@@ -320,6 +324,13 @@ pub fn edit_text_apply(text: &str, new: &Config) -> Result<String> {
         sync!(t, "fade_secs", o.fade_secs, n.fade_secs, |x: f64| round_to(
             x, 2
         ));
+        sync!(
+            t,
+            "preserve_calibration",
+            o.preserve_calibration,
+            n.preserve_calibration,
+            |x: bool| x
+        );
     }
     let (o, n) = (&old.color, &new.color);
     if o != n {
@@ -583,6 +594,25 @@ temperature = 5000
         let mut cfg = Config::default();
         cfg.color.night_temperature = 3000;
         let out = edit_text_apply("", &cfg).unwrap();
+        assert_eq!(Config::parse(&out).unwrap(), cfg);
+    }
+
+    #[test]
+    fn preserve_calibration_defaults_on_and_saves() {
+        assert!(Config::default().general.preserve_calibration);
+        assert!(
+            Config::parse("[general]\nfade_secs = 1.0")
+                .unwrap()
+                .general
+                .preserve_calibration
+        );
+        let mut cfg = Config::parse(DEFAULT_CONFIG).unwrap();
+        cfg.general.preserve_calibration = false;
+        let out = edit_text_apply(DEFAULT_CONFIG, &cfg).unwrap();
+        assert_eq!(Config::parse(&out).unwrap(), cfg);
+        assert!(out.contains("preserve_calibration = false"));
+        // Also when the key isn't in the file yet.
+        let out = edit_text_apply("[general]\nfade_secs = 0.5\n", &cfg).unwrap();
         assert_eq!(Config::parse(&out).unwrap(), cfg);
     }
 

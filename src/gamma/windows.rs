@@ -1,10 +1,13 @@
 //! Windows backend: GDI `SetDeviceGammaRamp` on every attached display.
+//! The ramp found on each display at startup (`GetDeviceGammaRamp`) is kept as its calibration
+//! base; see `calibration.rs`.
 //!
 //! Windows refuses ramps that deviate "too far" from identity (roughly below ~3400-4000K)
 //! unless HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ICM\GdiIcmGammaRange (DWORD) = 256.
 //! `ember` reports a hint when that happens; see README.
 
 use super::Backend;
+use super::calibration::Calibration;
 use crate::color::{ColorSetting, Ramp};
 use anyhow::{Result, bail};
 use std::ptr::null;
@@ -13,18 +16,20 @@ use windows_sys::Win32::Graphics::Gdi::{
     CreateDCW, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, DISPLAY_DEVICEW, DeleteDC, EnumDisplayDevicesW,
     HDC,
 };
-use windows_sys::Win32::UI::ColorSystem::SetDeviceGammaRamp;
+use windows_sys::Win32::UI::ColorSystem::{GetDeviceGammaRamp, SetDeviceGammaRamp};
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
 type GdiRamp = [u16; 3 * 256];
 
 struct Display {
+    /// Device name such as `\\.\DISPLAY1`; also the key for its saved calibration curve.
     name: String,
     hdc: HDC,
 }
 
 pub struct Gdi {
     displays: Vec<Display>,
+    calibration: Calibration,
     warned_range: bool,
 }
 
@@ -33,8 +38,21 @@ fn wide_to_string(w: &[u16]) -> String {
     String::from_utf16_lossy(&w[..end])
 }
 
+/// The ramp currently loaded on `hdc` (by Windows colour management, a calibration loader, or us).
+fn read_ramp(hdc: HDC) -> Option<Ramp> {
+    let mut buf: GdiRamp = [0; 768];
+    if unsafe { GetDeviceGammaRamp(hdc, buf.as_mut_ptr().cast()) } == 0 {
+        return None;
+    }
+    Some(Ramp {
+        red: buf[..256].to_vec(),
+        green: buf[256..512].to_vec(),
+        blue: buf[512..].to_vec(),
+    })
+}
+
 impl Gdi {
-    pub fn open() -> Result<Gdi> {
+    pub fn open(preserve_calibration: bool) -> Result<Gdi> {
         let mut displays = Vec::new();
         let mut i = 0;
         loop {
@@ -61,8 +79,16 @@ impl Gdi {
             bail!("no displays found");
         }
         log::info!("windows: controlling {} display(s)", displays.len());
+        let mut calibration = Calibration::new(preserve_calibration);
+        calibration.capture(
+            displays
+                .iter()
+                .map(|d| (d.name.clone(), read_ramp(d.hdc)))
+                .collect(),
+        );
         Ok(Gdi {
             displays,
+            calibration,
             warned_range: false,
         })
     }
@@ -74,13 +100,13 @@ impl Backend for Gdi {
     }
 
     fn apply(&mut self, setting: ColorSetting) -> Result<()> {
-        let ramp = Ramp::build(setting, 256);
-        let mut buf: GdiRamp = [0; 768];
-        buf[..256].copy_from_slice(&ramp.red);
-        buf[256..512].copy_from_slice(&ramp.green);
-        buf[512..].copy_from_slice(&ramp.blue);
         let mut failed = Vec::new();
         for d in &self.displays {
+            let ramp = self.calibration.ramp(&d.name, setting, 256);
+            let mut buf: GdiRamp = [0; 768];
+            buf[..256].copy_from_slice(&ramp.red);
+            buf[256..512].copy_from_slice(&ramp.green);
+            buf[512..].copy_from_slice(&ramp.blue);
             if unsafe { SetDeviceGammaRamp(d.hdc, buf.as_ptr().cast()) } == 0 {
                 failed.push(d.name.clone());
             }
@@ -101,6 +127,10 @@ impl Backend for Gdi {
 
     fn restore(&mut self) -> Result<()> {
         self.apply(ColorSetting::NEUTRAL)
+    }
+
+    fn set_preserve_calibration(&mut self, on: bool) {
+        self.calibration.set_preserve(on);
     }
 
     fn focused_pid(&mut self) -> Option<u32> {
