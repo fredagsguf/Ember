@@ -16,6 +16,8 @@ pub struct Config {
     pub schedule: Schedule,
     #[serde(rename = "rules")]
     pub rules: Vec<Rule>,
+    /// Per-display settings, `[[displays]]`. Displays that aren't listed get the defaults.
+    pub displays: Vec<Display>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -91,6 +93,57 @@ pub struct Rule {
     pub temperature: Option<u32>,
     #[serde(default)]
     pub brightness: Option<f32>,
+}
+
+/// Settings for one display. Ignored with KDE Night Light, which tints every screen alike.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Display {
+    /// Windows device name (`\\.\DISPLAY2`) or X11/Wayland output name (`HDMI-1`).
+    /// Case-insensitive.
+    pub id: String,
+    /// `false` leaves the display untouched: it keeps its calibration curve (or neutral), exactly
+    /// as when Ember is off.
+    #[serde(default = "yes")]
+    pub tint: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Display {
+    /// Settings for `id` with nothing changed from the defaults.
+    pub fn new(id: &str) -> Display {
+        Display {
+            id: id.to_string(),
+            tint: true,
+        }
+    }
+
+    fn is(&self, id: &str) -> bool {
+        self.id.trim().eq_ignore_ascii_case(id.trim())
+    }
+}
+
+/// Should Ember tint display `id`? Yes unless a `[[displays]]` entry says `tint = false`.
+/// X11 outputs that mirror each other share one ramp and are named `A+B`; that ramp is left
+/// alone if any of them is.
+pub fn tints_display(displays: &[Display], id: &str) -> bool {
+    let excluded = |name: &str| displays.iter().any(|d| !d.tint && d.is(name));
+    !(excluded(id) || (id.contains('+') && id.split('+').any(excluded)))
+}
+
+/// Turn tinting of display `id` on or off, dropping its entry once it matches the defaults.
+pub fn set_display_tint(displays: &mut Vec<Display>, id: &str, tint: bool) {
+    match displays.iter_mut().find(|d| d.is(id)) {
+        Some(d) => d.tint = tint,
+        None => displays.push(Display {
+            tint,
+            ..Display::new(id)
+        }),
+    }
+    displays.retain(|d| !d.is(id) || *d != Display::new(&d.id));
 }
 
 impl Rule {
@@ -176,6 +229,14 @@ impl Config {
         for (i, r) in self.rules.iter().enumerate() {
             if r.processes.iter().all(|p| p.trim().is_empty()) {
                 bail!("rules[{i}] has no process names");
+            }
+        }
+        for (i, d) in self.displays.iter().enumerate() {
+            if d.id.trim().is_empty() {
+                bail!("displays[{i}] has no id");
+            }
+            if self.displays[..i].iter().any(|e| e.is(&d.id)) {
+                bail!("displays[{i}]: display {:?} is listed twice", d.id);
             }
         }
         Ok(())
@@ -444,6 +505,34 @@ pub fn edit_text_apply(text: &str, new: &Config) -> Result<String> {
         }
     }
 
+    if old.displays != new.displays {
+        if !doc.contains_key("displays") {
+            doc.insert("displays", Item::ArrayOfTables(ArrayOfTables::new()));
+        }
+        let arr = doc["displays"]
+            .as_array_of_tables_mut()
+            .context("`displays` must be written as [[displays]] tables")?;
+        while arr.len() > new.displays.len() {
+            arr.remove(arr.len() - 1);
+        }
+        for (i, d) in new.displays.iter().enumerate() {
+            if i >= arr.len() {
+                arr.push(Table::new());
+            }
+            let prev = old.displays.get(i);
+            if prev == Some(d) {
+                continue;
+            }
+            let t = arr.get_mut(i).expect("index checked above");
+            if prev.map(|p| &p.id) != Some(&d.id) {
+                set(t, "id", d.id.as_str());
+            }
+            if prev.map(|p| p.tint) != Some(d.tint) {
+                set(t, "tint", d.tint);
+            }
+        }
+    }
+
     let out = doc.to_string();
     let check = Config::parse(&out).context("edited config would be invalid")?;
     if &check != new {
@@ -654,5 +743,96 @@ temperature = 5000
         cfg.general.toggle_hotkey = String::new();
         let out = edit_text_apply("[general]\nfade_secs = 1.0\n", &cfg).unwrap();
         assert_eq!(Config::parse(&out).unwrap().general.toggle_hotkey, "");
+    }
+
+    fn untinted(id: &str) -> Display {
+        Display {
+            tint: false,
+            ..Display::new(id)
+        }
+    }
+
+    #[test]
+    fn displays_parse_with_defaults() {
+        assert!(Config::default().displays.is_empty());
+        let cfg = Config::parse(
+            r#"
+[[displays]]
+id = '\\.\DISPLAY2'
+tint = false
+
+[[displays]]
+id = "HDMI-1"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.displays,
+            vec![untinted(r"\\.\DISPLAY2"), Display::new("HDMI-1")]
+        );
+    }
+
+    #[test]
+    fn bad_display_entries_are_rejected() {
+        assert!(Config::parse("[[displays]]\nid = \" \"\ntint = false").is_err());
+        assert!(Config::parse("[[displays]]\ntint = false").is_err());
+        assert!(Config::parse("[[displays]]\nid = \"DP-1\"\ntin = false").is_err());
+        let twice = "[[displays]]\nid = \"DP-1\"\n[[displays]]\nid = \"dp-1\"\ntint = false";
+        let e = Config::parse(twice).unwrap_err();
+        assert!(format!("{e:#}").contains("twice"), "{e:#}");
+    }
+
+    #[test]
+    fn which_displays_are_tinted() {
+        let displays = vec![
+            untinted(r"\\.\DISPLAY2"),
+            Display::new("DP-1"),
+            untinted("HDMI-1"),
+        ];
+        assert!(tints_display(&displays, r"\\.\DISPLAY1"));
+        assert!(!tints_display(&displays, r"\\.\DISPLAY2"));
+        assert!(
+            !tints_display(&displays, r"\\.\display2"),
+            "case-insensitive"
+        );
+        assert!(tints_display(&displays, "DP-1"), "listed with tint = true");
+        assert!(!tints_display(&displays, "HDMI-1"));
+        assert!(tints_display(&displays, "HDMI-10"));
+        // Mirrored X11 outputs share one ramp.
+        assert!(!tints_display(&displays, "DP-1+HDMI-1"));
+        assert!(tints_display(&displays, "DP-1+DP-2"));
+        assert!(tints_display(&[], "anything"));
+    }
+
+    #[test]
+    fn set_display_tint_adds_and_drops_entries() {
+        let mut displays = Vec::new();
+        set_display_tint(&mut displays, "HDMI-1", false);
+        assert_eq!(displays, vec![untinted("HDMI-1")]);
+        // Ticking it again leaves nothing that differs from the defaults.
+        set_display_tint(&mut displays, "hdmi-1", true);
+        assert!(displays.is_empty());
+        set_display_tint(&mut displays, "DP-1", true);
+        assert!(displays.is_empty());
+    }
+
+    #[test]
+    fn apply_writes_displays_and_keeps_comments() {
+        let mut cfg = Config::parse(DEFAULT_CONFIG).unwrap();
+        set_display_tint(&mut cfg.displays, r"\\.\DISPLAY2", false);
+        set_display_tint(&mut cfg.displays, "HDMI-1", false);
+        let out = edit_text_apply(DEFAULT_CONFIG, &cfg).unwrap();
+        assert_eq!(Config::parse(&out).unwrap(), cfg);
+        assert!(out.contains("# Ember configuration."));
+        assert!(out.contains("night_temperature = 3400 # lower = warmer/redder"));
+
+        cfg.displays[0].tint = true;
+        let out2 = edit_text_apply(&out, &cfg).unwrap();
+        assert_eq!(Config::parse(&out2).unwrap(), cfg);
+
+        cfg.displays.clear();
+        let out3 = edit_text_apply(&out2, &cfg).unwrap();
+        assert_eq!(Config::parse(&out3).unwrap(), cfg);
+        assert!(!out3.contains("\n[[displays]]"));
     }
 }

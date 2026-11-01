@@ -1,6 +1,7 @@
 //! Platform backends that actually change the screen colours.
 
 use crate::color::ColorSetting;
+use crate::config::Display;
 use anyhow::Result;
 
 pub mod calibration;
@@ -28,6 +29,15 @@ pub trait Backend {
     }
     /// Build ramps on each display's calibration curve (`true`) or on identity (`false`).
     fn set_preserve_calibration(&mut self, _on: bool) {}
+    /// Per-display settings (`[[displays]]`): displays with `tint = false` are kept on their base
+    /// curve, exactly as `restore` leaves them. Ignored by backends that can't tell displays
+    /// apart (KDE Night Light).
+    fn set_displays(&mut self, _displays: &[Display]) {}
+    /// The displays connected now as `(id, label)`: the id `[[displays]]` entries match and a
+    /// friendlier name for the settings window (the monitor model where the platform says).
+    fn displays(&mut self) -> Vec<(String, String)> {
+        Vec::new()
+    }
     /// PID of the process that owns the foreground window, if the platform can tell.
     fn focused_pid(&mut self) -> Option<u32>;
     /// Wayland app_id of the focused window, for compositors that can't tell the PID.
@@ -65,14 +75,21 @@ impl Backend for DryRun {
     }
 }
 
-/// `preserve_calibration`: see [`Backend::set_preserve_calibration`].
-pub fn open(dry_run: bool, preserve_calibration: bool) -> Result<Box<dyn Backend>> {
+/// `preserve_calibration`: see [`Backend::set_preserve_calibration`];
+/// `displays`: see [`Backend::set_displays`].
+pub fn open(
+    dry_run: bool,
+    preserve_calibration: bool,
+    displays: &[Display],
+) -> Result<Box<dyn Backend>> {
     if dry_run {
         return Ok(Box::new(DryRun));
     }
     #[cfg(windows)]
     {
-        return Ok(Box::new(windows::Gdi::open(preserve_calibration)?));
+        let mut b = windows::Gdi::open(preserve_calibration)?;
+        b.set_displays(displays);
+        return Ok(Box::new(b));
     }
     #[cfg(target_os = "linux")]
     {
@@ -81,13 +98,18 @@ pub fn open(dry_run: bool, preserve_calibration: bool) -> Result<Box<dyn Backend
             env("WAYLAND_DISPLAY").as_deref(),
             env("XDG_SESSION_TYPE").as_deref(),
         ) {
-            return open_wayland(&session::desktop(env("XDG_CURRENT_DESKTOP").as_deref()));
+            return open_wayland(
+                &session::desktop(env("XDG_CURRENT_DESKTOP").as_deref()),
+                displays,
+            );
         }
-        return Ok(Box::new(x11::RandR::open(preserve_calibration)?));
+        let mut b = x11::RandR::open(preserve_calibration)?;
+        b.set_displays(displays);
+        return Ok(Box::new(b));
     }
     #[allow(unreachable_code)]
     {
-        let _ = preserve_calibration;
+        let _ = (preserve_calibration, displays);
         anyhow::bail!("this platform is not supported yet")
     }
 }
@@ -95,15 +117,23 @@ pub fn open(dry_run: bool, preserve_calibration: bool) -> Result<Box<dyn Backend
 /// Wayland has no common gamma API: use wlroots' protocol if the compositor has it, else KDE's
 /// Night Light, else explain what is supported.
 #[cfg(target_os = "linux")]
-fn open_wayland(desktop: &session::Desktop) -> Result<Box<dyn Backend>> {
+fn open_wayland(desktop: &session::Desktop, displays: &[Display]) -> Result<Box<dyn Backend>> {
     use anyhow::Context;
 
-    if let Some(b) = wlroots::Wlr::open()? {
+    if let Some(b) = wlroots::Wlr::open(displays)? {
         return Ok(Box::new(b));
     }
     log::debug!("wayland: compositor has no wlr-gamma-control");
     match kwin::NightLight::open() {
-        Ok(b) => Ok(Box::new(b)),
+        Ok(b) => {
+            // KWin has one Night Light for all screens.
+            if displays.iter().any(|d| !d.tint) {
+                log::warn!(
+                    "kwin: [[displays]] settings are ignored: Night Light tints every screen"
+                );
+            }
+            Ok(Box::new(b))
+        }
         // On KDE the KWin error (Night Light switched off, too old…) is the useful part.
         Err(e) if *desktop == session::Desktop::Kde => {
             Err(e).context(session::unsupported_message(desktop))
