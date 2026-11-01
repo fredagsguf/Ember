@@ -134,7 +134,6 @@ Ember is young. It runs on Windows 10/11 and on Linux (X11, and Wayland on sway,
 
 Coming next:
 
-- Better Wayland support
 - A signed Windows app, so there's no "Windows protected your PC" warning
 - Easier installs through winget and Linux package managers
 
