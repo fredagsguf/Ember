@@ -6,12 +6,17 @@
 //! would make the tint permanent (and stack it again on every start). So captured bases are saved
 //! in the state dir, and a ramp only counts as new calibration if it is *not* a per-channel
 //! scaling of the saved base or of identity, which is all Ember (or any f.lux-style tool) writes.
+//!
+//! Calibration loaders often run after Ember (both start at login), so backends that can read the
+//! current ramp also look at it before writing: if it isn't what Ember last wrote and is a new
+//! curve by the same test, it becomes the base ([`Calibration::check`]).
 
 use crate::color::{ColorSetting, Ramp, resample};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// How far (in 16-bit units, about 0.5 %) a ramp may stray from a scaled curve and still count
 /// as one. Covers Ember's rounding and drivers that keep fewer than 16 bits per entry.
@@ -142,11 +147,31 @@ fn save_store(path: &Path, store: &Store) -> Result<()> {
     Ok(())
 }
 
+/// Whether `current`, found on a display just before Ember writes to it, is a calibration curve
+/// loaded since Ember last wrote `last` there, and so should become the display's new `base`.
+///
+/// Only a genuinely new curve counts. Fullscreen games and display mode changes often reset the
+/// ramp to identity, and a tint on the base (Ember's own, or the settings window's preview) is
+/// not new either: those are simply overwritten, keeping the base.
+pub fn is_new_calibration(current: &Ramp, last: Option<&Ramp>, base: Option<&Ramp>) -> bool {
+    last != Some(current) && decide(current, base) == Decision::Capture
+}
+
+/// How long after Ember starts a curve loaded by another program is taken as calibration.
+/// Login-time loaders run within this; a curve that shows up later is more likely a game's own
+/// gamma or brightness setting, which must not become the base.
+const LIVE_PICKUP: Duration = Duration::from_secs(10 * 60);
+
 /// Each display's base curve, as a backend uses it.
 pub struct Calibration {
     preserve: bool,
     /// Displays seen so far; `None` = identity base.
     bases: HashMap<String, Option<Ramp>>,
+    /// The ramp Ember last wrote to each display, to tell another program's changes from ours.
+    written: HashMap<String, Ramp>,
+    started: Instant,
+    /// Ember is stepping aside for an app rule, so new curves are probably that app's.
+    app_rule_active: bool,
 }
 
 impl Calibration {
@@ -154,6 +179,43 @@ impl Calibration {
         Calibration {
             preserve,
             bases: HashMap::new(),
+            written: HashMap::new(),
+            started: Instant::now(),
+            app_rule_active: false,
+        }
+    }
+
+    pub fn set_app_rule_active(&mut self, on: bool) {
+        self.app_rule_active = on;
+    }
+
+    /// Record that `ramp` was just written to `display`.
+    pub fn wrote(&mut self, display: &str, ramp: Ramp) {
+        self.written.insert(display.to_string(), ramp);
+    }
+
+    /// Before writing to `display`, look at the ramp now on it: if a calibration loader put a
+    /// new curve there since Ember's last write (it ran after Ember started), adopt it as the
+    /// display's base, here and in the saved store. See [`is_new_calibration`].
+    /// Only within [`LIVE_PICKUP`] of starting, and not while an app rule is active.
+    pub fn check(&mut self, display: &str, current: &Ramp) {
+        if self.app_rule_active || self.started.elapsed() > LIVE_PICKUP {
+            return;
+        }
+        let Some(base) = self.bases.get(display) else {
+            return;
+        };
+        if !is_new_calibration(current, self.written.get(display), base.as_ref()) {
+            return;
+        }
+        log::info!("calibration: {display}: a new calibration curve was loaded; tinting on it");
+        self.bases
+            .insert(display.to_string(), Some(current.clone()));
+        let path = store_path();
+        let mut store = load_store(&path);
+        store.displays.insert(display.to_string(), current.clone());
+        if let Err(e) = save_store(&path, &store) {
+            log::warn!("saving calibration curves: {e:#}");
         }
     }
 
@@ -204,6 +266,14 @@ impl Calibration {
             .filter(|_| self.preserve)
             .and_then(Option::as_ref);
         Ramp::build_on(base, setting, size)
+    }
+
+    /// The ramp for a display Ember doesn't tint (`[[displays]] tint = false`): its own curve,
+    /// kept even with `preserve_calibration` off, because "leave this screen alone" includes its
+    /// calibration.
+    pub fn untinted_ramp(&self, display: &str, size: usize) -> Ramp {
+        let base = self.bases.get(display).and_then(Option::as_ref);
+        Ramp::build_on(base, ColorSetting::NEUTRAL, size)
     }
 }
 
@@ -355,6 +425,104 @@ mod tests {
         let text = store.to_text().unwrap();
         assert_eq!(Store::parse(&text).unwrap(), store);
         assert_eq!(Store::parse("").unwrap(), Store::default());
+    }
+
+    #[test]
+    fn identity_reset_keeps_the_saved_base() {
+        // A fullscreen game or a mode change put identity (or a plain tint) back.
+        let base = calibration(256, 0.08);
+        let last = Ramp::build_on(Some(&base), warm(3400, 1.0), 256);
+        for current in [
+            Ramp::identity(256),
+            Ramp::build(warm(3400, 1.0), 256),
+            quantize(&Ramp::identity(256)),
+        ] {
+            assert!(!is_new_calibration(&current, Some(&last), Some(&base)));
+        }
+    }
+
+    #[test]
+    fn a_tint_on_the_base_is_not_a_change() {
+        let base = calibration(256, 0.08);
+        let last = Ramp::build_on(Some(&base), warm(3400, 1.0), 256);
+        // Ember's own last ramp, exactly or as read back by an 8-bit driver.
+        assert!(!is_new_calibration(&last, Some(&last), Some(&base)));
+        assert!(!is_new_calibration(
+            &quantize(&last),
+            Some(&last),
+            Some(&base)
+        ));
+        // Another tint of the same base, e.g. the settings window previewing a slider.
+        let preview = Ramp::build_on(Some(&base), warm(2000, 0.7), 256);
+        assert!(!is_new_calibration(&preview, Some(&last), Some(&base)));
+        // A tint on identity, e.g. the settings window with preserve_calibration off.
+        let plain = Ramp::build(warm(2700, 1.0), 256);
+        assert!(!is_new_calibration(&plain, Some(&last), Some(&base)));
+    }
+
+    #[test]
+    fn a_curve_loaded_later_becomes_the_base() {
+        let new = calibration(256, 0.08);
+        // Started uncalibrated, then the loader ran.
+        let last = Ramp::build(warm(3400, 1.0), 256);
+        assert!(is_new_calibration(&new, Some(&last), None));
+        assert!(is_new_calibration(&new, None, None));
+        // Recalibrated: a different curve replaces the old one.
+        let old = calibration(256, -0.06);
+        let last = Ramp::build_on(Some(&old), warm(3400, 1.0), 256);
+        assert!(is_new_calibration(&new, Some(&last), Some(&old)));
+        // But Ember never "captures" a curve it wrote itself.
+        assert!(!is_new_calibration(&new, Some(&new), None));
+    }
+
+    #[test]
+    fn check_adopts_only_new_curves() {
+        let mut c = Calibration::new(true);
+        let s = warm(3400, 1.0);
+        let base = calibration(256, 0.08);
+        c.bases.insert("A".into(), Some(base.clone()));
+        let ours = c.ramp("A", s, 256);
+        c.wrote("A", ours.clone());
+        c.check("A", &ours);
+        c.check("A", &Ramp::identity(256));
+        assert_eq!(c.ramp("A", s, 256), Ramp::build_on(Some(&base), s, 256));
+        // Displays the backend hasn't captured yet are left to `capture`.
+        c.check("unknown", &base);
+        assert!(!c.knows("unknown"));
+    }
+
+    #[test]
+    fn no_pickup_while_an_app_rule_is_active_or_after_the_startup_window() {
+        let s = warm(3400, 1.0);
+        let game_curve = calibration(256, 0.15);
+        let fresh = || {
+            let mut c = Calibration::new(true);
+            c.bases.insert("A".into(), None);
+            c.wrote("A", c.ramp("A", s, 256));
+            c
+        };
+
+        // A game focused with a rule sets its own gamma curve.
+        let mut c = fresh();
+        c.set_app_rule_active(true);
+        c.check("A", &game_curve);
+        assert_eq!(c.ramp("A", s, 256), Ramp::build(s, 256));
+
+        // Long after start, a new curve is more likely a game's than a login-time loader's.
+        let mut c = fresh();
+        c.started -= LIVE_PICKUP + Duration::from_secs(1);
+        c.check("A", &game_curve);
+        assert_eq!(c.ramp("A", s, 256), Ramp::build(s, 256));
+    }
+
+    #[test]
+    fn untinted_displays_keep_their_curve_even_without_preserving() {
+        let base = calibration(256, 0.08);
+        let mut c = Calibration::new(false);
+        c.bases.insert("A".into(), Some(base.clone()));
+        assert_eq!(c.untinted_ramp("A", 256), base);
+        c.bases.insert("B".into(), None);
+        assert_eq!(c.untinted_ramp("B", 256), Ramp::identity(256));
     }
 
     #[test]

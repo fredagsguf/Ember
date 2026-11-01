@@ -38,6 +38,7 @@ Warm, dim light in the evening is easier on the eyes and on your sleep. That's w
 - **Settings one click away.** Click the tray icon and the settings window opens right above it. Drag a slider and your screen shows that exact colour while you hold it.
 - **Pause when you need to.** Disable for 15 minutes, an hour or three hours, or until you switch it back on. Press **Ctrl+Alt+End** from any app to pause or resume (you can change the hotkey in Settings).
 - **Respects your calibration.** If your monitor is colour-calibrated, Ember tints on top of your calibration curve and puts it back when it steps aside, instead of wiping it.
+- **Per-monitor control.** Got a calibrated screen for photo editing? Untick it under *Displays* in Settings and Ember leaves it alone while it warms up the others.
 - **Windows and Linux.** Windows 10/11, any Linux desktop on X11, and Wayland on sway, Hyprland and other wlroots compositors or KDE Plasma.
 - **Light and private.** One small program with no installer and no runtime. Ember never connects to the internet: sunset times are calculated on your PC.
 - **Free and open source** under the MIT license.
@@ -119,7 +120,7 @@ Ember changes the display's colour curves through the same Windows API f.lux use
 Some fullscreen-exclusive games reset the colour curves; Ember re-applies its colours every couple of seconds. For games you've set a rule for, it doesn't matter: Ember is off while they're focused anyway.
 
 **What about my monitor's colour calibration?**
-Ember keeps it. When it starts, Ember reads the calibration curve (ICC/VCGT) that Windows colour management, DisplayCAL, `xcalib` or `dispwin` loaded into each display, tints on top of it, and puts it back when it turns off. Load your calibration before starting Ember (or restart Ember after loading a new one). Ember remembers each display's curve, so a crash can't leave its own tint behind as "calibration". A calibration that only scales the red, green and blue levels (no curve) looks the same as a tint, so Ember treats it as neutral. Untick *Keep my display's calibration curve* in Settings → Advanced (`preserve_calibration = false`) to reset to neutral as before.
+Ember keeps it. When it starts, Ember reads the calibration curve (ICC/VCGT) that Windows colour management, DisplayCAL, `xcalib` or `dispwin` loaded into each display, tints on top of it, and puts it back when it turns off. On Windows and X11 it also picks up a calibration loaded in the first minutes after it starts, so it works when your calibration loader runs at login after Ember. (On Wayland, load it before starting Ember.) Ember remembers each display's curve, so a crash can't leave its own tint behind as "calibration". A calibration that only scales the red, green and blue levels (no curve) looks the same as a tint, so Ember treats it as neutral. Untick *Keep my display's calibration curve* in Settings → Advanced (`preserve_calibration = false`) to reset to neutral as before.
 
 **Does it collect any data?**
 No. Ember has no network code at all. It writes a log file to `%LOCALAPPDATA%\ember\data\ember.log` (Linux: `~/.local/share/ember/ember.log`), and that never leaves your PC.
@@ -136,7 +137,6 @@ Coming next:
 - Better Wayland support, including the toggle hotkey
 - A signed Windows app, so there's no "Windows protected your PC" warning
 - Easier installs through winget and Linux package managers
-- Per-monitor settings
 
 GNOME on Wayland isn't supported, because GNOME doesn't let apps change the screen colours; use its built-in Night Light there. macOS isn't planned.
 
@@ -160,6 +160,7 @@ when = "focused"         # or "running"
 - **Schedule**: `fixed` (clock times with a fade), `solar` (follows the sun at your latitude/longitude), or `always_night`.
 - **Rules**: the first match wins. `when = "focused"` applies only while the app is in the foreground; `"running"` applies as long as it's open. Leave out `temperature` and `brightness` to turn Ember off; set either to use that colour instead (e.g. a movie player at 5000K).
 - Process names are case-insensitive and `.exe` is optional, so one rule works on both Windows and Linux.
+- **Displays**: a `[[displays]]` entry with `id = '\\.\DISPLAY2'` (Linux: an output name such as `"HDMI-1"`) and `tint = false` leaves that screen untinted. This doesn't work with KDE's Night Light, which tints every screen.
 - **Toggle hotkey**: `[general] toggle_hotkey = "Ctrl+Alt+End"` pauses and resumes Ember from any app. Combine `Ctrl`, `Alt`, `Shift` and `Win` (Super on Linux) with a letter, digit, `F1`–`F24`, `End`, `Home`, `Insert`, `Delete`, `PageUp`, `PageDown`, `Pause`, `ScrollLock`, an arrow key (`Left`, `Right`, `Up`, `Down`) or `Space`. `F13`–`F24`, `Pause` and `ScrollLock` also work without a modifier. Set it to `""` to turn the hotkey off. If another app already uses the combination, Ember logs a warning and carries on without it. On Linux it needs X11.
 - On wlroots Wayland compositors (sway, Hyprland…), `when = "focused"` rules match the focused window's **app_id** instead of its process name, because Wayland doesn't say which process owns a window. It's usually the program name (`firefox`, `mpv`) or a reverse-DNS id (`org.mozilla.firefox`); Steam games often show up as `steam_app_<id>` (CS2 is `steam_app_730`) or under the game's own name. `swaymsg -t get_tree` or `hyprctl clients` shows it, or tick *Disable while … is focused* in the tray, which uses the right name. `when = "running"` rules match process names everywhere.
 

@@ -1,6 +1,7 @@
 //! Windows backend: GDI `SetDeviceGammaRamp` on every attached display.
 //! The ramp found on each display at startup (`GetDeviceGammaRamp`) is kept as its calibration
-//! base; see `calibration.rs`.
+//! base; see `calibration.rs`. The ramp is read again before every write, so a calibration curve
+//! loaded after Ember started (Windows colour management, DisplayCAL's loader) is picked up.
 //!
 //! Windows refuses ramps that deviate "too far" from identity (roughly below ~3400-4000K)
 //! unless HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ICM\GdiIcmGammaRange (DWORD) = 256.
@@ -9,6 +10,7 @@
 use super::Backend;
 use super::calibration::Calibration;
 use crate::color::{ColorSetting, Ramp};
+use crate::config::{self, Display as DisplayConfig};
 use anyhow::{Result, bail};
 use std::ptr::null;
 use windows_sys::Win32::Foundation::HWND;
@@ -24,18 +26,41 @@ type GdiRamp = [u16; 3 * 256];
 struct Display {
     /// Device name such as `\\.\DISPLAY1`; also the key for its saved calibration curve.
     name: String,
+    /// The monitor's model as Windows names it, e.g. "DELL U2720Q", for the settings window.
+    monitor: Option<String>,
     hdc: HDC,
 }
 
 pub struct Gdi {
     displays: Vec<Display>,
     calibration: Calibration,
+    settings: Vec<DisplayConfig>,
     warned_range: bool,
 }
 
 fn wide_to_string(w: &[u16]) -> String {
     let end = w.iter().position(|&c| c == 0).unwrap_or(w.len());
     String::from_utf16_lossy(&w[..end])
+}
+
+/// The model of the (first) monitor on display adapter output `device` (`\\.\DISPLAY1`).
+fn monitor_name(device: &[u16]) -> Option<String> {
+    let mut dd: DISPLAY_DEVICEW = unsafe { std::mem::zeroed() };
+    dd.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+    if unsafe { EnumDisplayDevicesW(device.as_ptr(), 0, &mut dd, 0) } == 0 {
+        return None;
+    }
+    let name = wide_to_string(&dd.DeviceString);
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+fn to_gdi(ramp: &Ramp) -> GdiRamp {
+    let mut buf: GdiRamp = [0; 768];
+    buf[..256].copy_from_slice(&ramp.red);
+    buf[256..512].copy_from_slice(&ramp.green);
+    buf[512..].copy_from_slice(&ramp.blue);
+    buf
 }
 
 /// The ramp currently loaded on `hdc` (by Windows colour management, a calibration loader, or us).
@@ -72,6 +97,7 @@ impl Gdi {
             }
             displays.push(Display {
                 name: wide_to_string(&dd.DeviceName),
+                monitor: monitor_name(&dd.DeviceName),
                 hdc,
             });
         }
@@ -89,6 +115,7 @@ impl Gdi {
         Ok(Gdi {
             displays,
             calibration,
+            settings: Vec::new(),
             warned_range: false,
         })
     }
@@ -102,13 +129,19 @@ impl Backend for Gdi {
     fn apply(&mut self, setting: ColorSetting) -> Result<()> {
         let mut failed = Vec::new();
         for d in &self.displays {
-            let ramp = self.calibration.ramp(&d.name, setting, 256);
-            let mut buf: GdiRamp = [0; 768];
-            buf[..256].copy_from_slice(&ramp.red);
-            buf[256..512].copy_from_slice(&ramp.green);
-            buf[512..].copy_from_slice(&ramp.blue);
-            if unsafe { SetDeviceGammaRamp(d.hdc, buf.as_ptr().cast()) } == 0 {
+            // Reading the ramp is a cheap local call, so do it every time (fade frames too).
+            if let Some(current) = read_ramp(d.hdc) {
+                self.calibration.check(&d.name, &current);
+            }
+            let ramp = if config::tints_display(&self.settings, &d.name) {
+                self.calibration.ramp(&d.name, setting, 256)
+            } else {
+                self.calibration.untinted_ramp(&d.name, 256)
+            };
+            if unsafe { SetDeviceGammaRamp(d.hdc, to_gdi(&ramp).as_ptr().cast()) } == 0 {
                 failed.push(d.name.clone());
+            } else {
+                self.calibration.wrote(&d.name, ramp);
             }
         }
         if !failed.is_empty() {
@@ -131,6 +164,24 @@ impl Backend for Gdi {
 
     fn set_preserve_calibration(&mut self, on: bool) {
         self.calibration.set_preserve(on);
+    }
+
+    fn set_app_rule_active(&mut self, on: bool) {
+        self.calibration.set_app_rule_active(on);
+    }
+
+    fn set_displays(&mut self, displays: &[DisplayConfig]) {
+        self.settings = displays.to_vec();
+    }
+
+    fn displays(&mut self) -> Vec<(String, String)> {
+        self.displays
+            .iter()
+            .map(|d| {
+                let label = d.monitor.clone().unwrap_or_else(|| d.name.clone());
+                (d.name.clone(), label)
+            })
+            .collect()
     }
 
     fn focused_pid(&mut self) -> Option<u32> {

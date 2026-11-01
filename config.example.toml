@@ -52,3 +52,19 @@ when = "focused"
 # name = "Movies: dim but keep it warm-ish"
 # processes = ["vlc", "mpv"]
 # temperature = 5000
+
+# ---------------------------------------------------------------------------
+# Per-display settings, e.g. to leave a colour-critical screen (photo editing,
+# a calibrated reference monitor) alone. Settings → Displays lists your screens.
+#
+#   id   – Windows: the device name, e.g. '\\.\DISPLAY2' (in single quotes);
+#          Linux: the output name, e.g. "HDMI-1" or "DP-2" (see `xrandr`)
+#   tint – false: never tint this display; it keeps its calibration curve
+#          (default true)
+#
+# Ignored on KDE Plasma Wayland, where KDE's Night Light tints every screen.
+# ---------------------------------------------------------------------------
+
+# [[displays]]
+# id = '\\.\DISPLAY2'
+# tint = false

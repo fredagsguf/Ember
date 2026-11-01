@@ -1,9 +1,17 @@
 //! Wayland backend for wlroots-based compositors (sway, Hyprland, river, Wayfire, labwc…):
 //! `wlr-gamma-control-unstable-v1` for the ramps (same mechanism as gammastep/wlsunset) and
 //! `wlr-foreign-toplevel-management-unstable-v1` for the focused window's app_id.
+//!
+//! Each output gets its own gamma control. Outputs with `tint = false` in `[[displays]]` get
+//! none, so the compositor shows their original ramp, as after `restore`. They're matched by the
+//! output name (wl_output v4), so outputs aren't given a control until their name has arrived.
+//!
+//! wlroots compositors don't tell clients the current ramp, so a calibration curve loaded while
+//! Ember runs can't be detected here (the compositor restores its own ramp when Ember lets go).
 
 use super::Backend;
 use crate::color::{ColorSetting, Ramp};
+use crate::config::{self, Display};
 use anyhow::{Context, Result, bail};
 use rustix::fs::MemfdFlags;
 use std::collections::HashMap;
@@ -32,8 +40,13 @@ struct Output {
     /// Registry name of the `wl_output` global, so it can be dropped when unplugged.
     global: u32,
     wl: WlOutput,
-    /// Connector name such as "DP-1" (wl_output v4), for log messages.
+    /// Connector name such as "DP-1" (wl_output v4), what `[[displays]]` entries match.
     name: Option<String>,
+    /// Human-readable description such as "Dell Inc. DELL U2720Q (DP-1)" (wl_output v4).
+    description: Option<String>,
+    /// The compositor has sent the output's initial properties (`done`, wl_output v2+), so its
+    /// name is known if it has one.
+    ready: bool,
     control: Option<ZwlrGammaControlV1>,
     /// Ramp length announced by the compositor; nothing can be sent before it arrives.
     size: Option<usize>,
@@ -50,6 +63,13 @@ impl Output {
             .clone()
             .unwrap_or_else(|| format!("#{}", self.global))
     }
+
+    /// Whether Ember should tint this output. Outputs without a name can't be configured.
+    fn wanted(&self, settings: &[Display]) -> bool {
+        self.name
+            .as_deref()
+            .is_none_or(|n| config::tints_display(settings, n))
+    }
 }
 
 /// Toplevel state is double-buffered: changes arrive one by one and take effect on `done`.
@@ -65,6 +85,8 @@ struct State {
     gamma: ZwlrGammaControlManagerV1,
     outputs: Vec<Output>,
     toplevels: HashMap<ObjectId, Toplevel>,
+    /// `[[displays]]` from the config.
+    settings: Vec<Display>,
 }
 
 impl State {
@@ -80,6 +102,9 @@ impl State {
             global,
             wl,
             name: None,
+            description: None,
+            // Before v2 there is no `done`, and no name either.
+            ready: version < 2,
             control: None,
             size: None,
             failed: false,
@@ -101,21 +126,37 @@ impl State {
         }
     }
 
-    /// Ask for a gamma control on every output that lacks one. Returns true if any were requested
-    /// (their `gamma_size` arrives with the next roundtrip).
+    /// Ask for a gamma control on every output to tint that lacks one, and let go of outputs not
+    /// to tint. Returns true if any were requested (their `gamma_size` arrives with the next
+    /// roundtrip).
     fn ensure_controls(&mut self, qh: &QueueHandle<Self>) -> bool {
         let mut created = false;
-        for o in self
-            .outputs
-            .iter_mut()
-            .filter(|o| o.control.is_none() && !o.failed)
-        {
-            o.control = Some(self.gamma.get_gamma_control(&o.wl, qh, o.global));
-            o.size = None;
-            o.applied = None;
-            created = true;
+        for o in &mut self.outputs {
+            if !o.wanted(&self.settings) {
+                if let Some(c) = o.control.take() {
+                    log::info!("wayland: leaving output {} untinted", o.label());
+                    c.destroy();
+                }
+                o.size = None;
+                o.applied = None;
+            } else if o.control.is_none() && !o.failed && o.ready {
+                o.control = Some(self.gamma.get_gamma_control(&o.wl, qh, o.global));
+                o.size = None;
+                o.applied = None;
+                created = true;
+            }
         }
         created
+    }
+
+    /// No output we should tint will take gamma changes.
+    fn all_refused(&self) -> bool {
+        let mut wanted = self
+            .outputs
+            .iter()
+            .filter(|o| o.ready && o.wanted(&self.settings))
+            .peekable();
+        wanted.peek().is_some() && wanted.all(|o| o.control.is_none())
     }
 
     fn focused_app_id(&self) -> Option<String> {
@@ -177,7 +218,7 @@ pub struct Wlr {
 
 impl Wlr {
     /// `Ok(None)` if the compositor doesn't offer wlr-gamma-control (it isn't wlroots-based).
-    pub fn open() -> Result<Option<Wlr>> {
+    pub fn open(settings: &[Display]) -> Result<Option<Wlr>> {
         let conn = Connection::connect_to_env()
             .context("connecting to the Wayland compositor (is WAYLAND_DISPLAY set?)")?;
         let (globals, queue) =
@@ -190,6 +231,7 @@ impl Wlr {
             gamma,
             outputs: Vec::new(),
             toplevels: HashMap::new(),
+            settings: settings.to_vec(),
         };
         let outputs: Vec<(u32, u32)> = globals.contents().with_list(|list| {
             list.iter()
@@ -200,7 +242,6 @@ impl Wlr {
         for (global, version) in outputs {
             state.add_output(globals.registry(), global, version, &qh);
         }
-        state.ensure_controls(&qh);
         let mut me = Wlr {
             queue,
             qh,
@@ -208,12 +249,17 @@ impl Wlr {
             state,
             toplevel_manager: None,
         };
+        // First the output names (to know which outputs to tint), then the gamma sizes.
+        me.queue
+            .roundtrip(&mut me.state)
+            .context("talking to the Wayland compositor")?;
+        me.state.ensure_controls(&me.qh);
         me.queue
             .roundtrip(&mut me.state)
             .context("talking to the Wayland compositor")?;
 
         let outputs = &me.state.outputs;
-        if !outputs.is_empty() && outputs.iter().all(|o| o.failed) {
+        if me.state.all_refused() {
             bail!(
                 "the compositor refused gamma control on every output. Another program is probably \
                  already adjusting the screen colours (gammastep, wlsunset, redshift, another Ember…); \
@@ -269,7 +315,11 @@ impl Backend for Wlr {
 
     fn apply(&mut self, setting: ColorSetting) -> Result<()> {
         self.pump()?;
-        // Outputs plugged in since last time, or controls dropped by restore().
+        // Outputs plugged in since last time: wait for their names.
+        if self.state.outputs.iter().any(|o| !o.ready) {
+            self.queue.roundtrip(&mut self.state)?;
+        }
+        // New outputs, controls dropped by restore(), or changed [[displays]] settings.
         if self.state.ensure_controls(&self.qh) {
             self.queue.roundtrip(&mut self.state)?;
         }
@@ -286,8 +336,7 @@ impl Backend for Wlr {
             o.applied = Some(setting);
         }
         self.queue.flush()?;
-        let outputs = &self.state.outputs;
-        if !outputs.is_empty() && outputs.iter().all(|o| o.control.is_none()) {
+        if self.state.all_refused() {
             bail!("no output accepts gamma changes (another program has taken control of them)");
         }
         Ok(())
@@ -308,6 +357,29 @@ impl Backend for Wlr {
     fn sync(&mut self) -> Result<()> {
         self.queue.roundtrip(&mut self.state)?;
         Ok(())
+    }
+
+    /// Takes effect on the next `apply`, which drops or requests the controls.
+    fn set_displays(&mut self, displays: &[Display]) {
+        self.state.settings = displays.to_vec();
+    }
+
+    fn displays(&mut self) -> Vec<(String, String)> {
+        if let Err(e) = self.pump() {
+            log::debug!("wayland: reading output list failed: {e:#}");
+        }
+        self.state
+            .outputs
+            .iter()
+            .filter_map(|o| {
+                let name = o.name.clone()?;
+                let label = match &o.description {
+                    Some(d) if !d.trim().is_empty() => d.trim().to_string(),
+                    _ => name.clone(),
+                };
+                Some((name, label))
+            })
+            .collect()
     }
 
     fn focused_pid(&mut self) -> Option<u32> {
@@ -355,10 +427,14 @@ impl Dispatch<WlOutput, u32> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let wl_output::Event::Name { name } = event
-            && let Some(o) = state.outputs.iter_mut().find(|o| o.global == *global)
-        {
-            o.name = Some(name);
+        let Some(o) = state.outputs.iter_mut().find(|o| o.global == *global) else {
+            return;
+        };
+        match event {
+            wl_output::Event::Name { name } => o.name = Some(name),
+            wl_output::Event::Description { description } => o.description = Some(description),
+            wl_output::Event::Done => o.ready = true,
+            _ => {}
         }
     }
 }

@@ -1,11 +1,15 @@
 //! Linux/X11 backend: RandR per-CRTC gamma ramps (same mechanism as redshift/xsct).
 //! The ramp found on each CRTC the first time it drives an output (`GetCrtcGamma`) is kept as
-//! that output's calibration base; see `calibration.rs`.
+//! that output's calibration base; see `calibration.rs`. The ramps are read again before writing
+//! (at most once every [`CHECK_EVERY`]), so a calibration curve loaded after Ember started
+//! (xcalib, dispwin, the desktop's colour manager) is picked up.
 
 use super::Backend;
 use super::calibration::Calibration;
 use crate::color::{ColorSetting, Ramp};
+use crate::config::{self, Display};
 use anyhow::{Context, Result};
+use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
 use x11rb::protocol::randr::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{Atom, AtomEnum, ConnectionExt as _, Window};
@@ -56,9 +60,16 @@ impl Focus {
     }
 }
 
+/// How often to look for ramps changed by another program. Reading them costs a roundtrip to the
+/// X server per CRTC; this skips that on fade frames (every 30 ms) but not on the regular poll
+/// (every second or more), which is soon enough to catch a calibration loader.
+const CHECK_EVERY: Duration = Duration::from_millis(900);
+
 pub struct RandR {
     focus: Focus,
     calibration: Calibration,
+    settings: Vec<Display>,
+    last_check: Option<Instant>,
 }
 
 struct Crtc {
@@ -80,6 +91,8 @@ impl RandR {
         let mut me = RandR {
             focus,
             calibration: Calibration::new(preserve_calibration),
+            settings: Vec::new(),
+            last_check: None,
         };
         let crtcs = me.crtcs()?;
         log::info!("x11: controlling {} CRTC(s)", crtcs.len());
@@ -150,6 +163,27 @@ impl RandR {
             self.calibration.capture(new);
         }
     }
+
+    /// Adopt calibration curves loaded by another program since we last wrote; see
+    /// `Calibration::check`. All requests go out before the first reply is awaited, so this costs
+    /// one roundtrip however many CRTCs there are.
+    fn check_changed(&mut self, crtcs: &[Crtc]) {
+        let conn = &self.focus.conn;
+        let pending: Vec<_> = crtcs
+            .iter()
+            .filter_map(|c| Some((c.name.as_ref()?, conn.randr_get_crtc_gamma(c.id).ok()?)))
+            .collect();
+        for (name, cookie) in pending {
+            if let Ok(g) = cookie.reply() {
+                let current = Ramp {
+                    red: g.red,
+                    green: g.green,
+                    blue: g.blue,
+                };
+                self.calibration.check(name, &current);
+            }
+        }
+    }
 }
 
 impl Backend for RandR {
@@ -160,13 +194,23 @@ impl Backend for RandR {
     fn apply(&mut self, setting: ColorSetting) -> Result<()> {
         let crtcs = self.crtcs()?;
         self.capture_new(&crtcs);
+        if self.last_check.is_none_or(|t| t.elapsed() >= CHECK_EVERY) {
+            self.last_check = Some(Instant::now());
+            self.check_changed(&crtcs);
+        }
         for c in crtcs {
             let r = match &c.name {
-                Some(name) => self.calibration.ramp(name, setting, c.gamma_size),
+                Some(name) if config::tints_display(&self.settings, name) => {
+                    self.calibration.ramp(name, setting, c.gamma_size)
+                }
+                Some(name) => self.calibration.untinted_ramp(name, c.gamma_size),
                 None => Ramp::build(setting, c.gamma_size),
             };
             self.conn()
                 .randr_set_crtc_gamma(c.id, &r.red, &r.green, &r.blue)?;
+            if let Some(name) = &c.name {
+                self.calibration.wrote(name, r);
+            }
         }
         self.conn().flush()?;
         Ok(())
@@ -179,6 +223,29 @@ impl Backend for RandR {
 
     fn set_preserve_calibration(&mut self, on: bool) {
         self.calibration.set_preserve(on);
+    }
+
+    fn set_app_rule_active(&mut self, on: bool) {
+        self.calibration.set_app_rule_active(on);
+    }
+
+    fn set_displays(&mut self, displays: &[Display]) {
+        self.settings = displays.to_vec();
+    }
+
+    /// One entry per CRTC in use, named after its output(s) like the config expects.
+    fn displays(&mut self) -> Vec<(String, String)> {
+        match self.crtcs() {
+            Ok(crtcs) => crtcs
+                .into_iter()
+                .filter_map(|c| c.name)
+                .map(|n| (n.clone(), n))
+                .collect(),
+            Err(e) => {
+                log::debug!("x11: listing outputs failed: {e:#}");
+                Vec::new()
+            }
+        }
     }
 
     fn sync(&mut self) -> Result<()> {

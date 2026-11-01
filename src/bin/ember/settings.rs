@@ -87,6 +87,10 @@ struct SettingsApp {
     backend: Option<Box<dyn gamma::Backend>>,
     /// Dragging a slider shows on screen, through `backend` or the running tray app.
     preview_works: bool,
+    /// Connected displays as (config id, label), from the backend.
+    displays: Vec<(String, String)>,
+    /// False when the desktop tints every screen alike (KDE Night Light).
+    per_display: bool,
     previewing: Option<ColorSetting>,
     last_preview_write: Option<Instant>,
     running_apps: Vec<String>,
@@ -356,12 +360,19 @@ impl SettingsApp {
             ),
         };
         // Same calibration handling as the tray app, so previewing doesn't wipe the curve.
+        let mut displays = Vec::new();
+        let mut per_display = true;
         let mut desktop_picks_colour = false;
-        let backend = match gamma::open(false, cfg.general.preserve_calibration) {
-            Ok(b) if b.live_preview() => Some(b),
+        let backend = match gamma::open(false, cfg.general.preserve_calibration, &cfg.displays) {
+            Ok(mut b) if b.live_preview() => {
+                displays = b.displays();
+                Some(b)
+            }
             Ok(b) => {
                 log::info!("live preview unavailable with the {} backend", b.name());
+                // The desktop picks the colours itself (KDE Night Light), for every screen.
                 desktop_picks_colour = true;
+                per_display = false;
                 None
             }
             Err(e) => {
@@ -384,6 +395,8 @@ impl SettingsApp {
             message,
             backend,
             preview_works,
+            displays,
+            per_display,
             previewing: None,
             last_preview_write: None,
             running_apps: Vec::new(),
@@ -430,6 +443,7 @@ impl SettingsApp {
         if let Ok(c) = Config::load(&self.path) {
             if let Some(b) = self.backend.as_mut() {
                 b.set_preserve_calibration(c.general.preserve_calibration);
+                b.set_displays(&c.displays);
             }
             self.cfg = c.clone();
             self.saved = c;
@@ -628,6 +642,37 @@ fn recorded_hotkey(key: egui::Key, m: egui::Modifiers) -> Result<Hotkey> {
     }
     text.push_str(key.name());
     text.parse()
+}
+
+/// A display in the Displays section.
+#[derive(Debug, PartialEq)]
+struct DisplayRow {
+    id: String,
+    label: String,
+    connected: bool,
+}
+
+/// The connected displays, then any configured ones that aren't connected right now (so their
+/// settings can still be undone).
+fn display_rows(connected: &[(String, String)], configured: &[config::Display]) -> Vec<DisplayRow> {
+    let mut rows: Vec<DisplayRow> = connected
+        .iter()
+        .map(|(id, label)| DisplayRow {
+            id: id.clone(),
+            label: label.clone(),
+            connected: true,
+        })
+        .collect();
+    for d in configured {
+        if !rows.iter().any(|r| r.id.eq_ignore_ascii_case(d.id.trim())) {
+            rows.push(DisplayRow {
+                id: d.id.clone(),
+                label: d.id.clone(),
+                connected: false,
+            });
+        }
+    }
+    rows
 }
 
 fn section(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
@@ -875,6 +920,35 @@ impl eframe::App for SettingsApp {
                     });
                 });
 
+                // ── Displays ───────────────────────────────────────────
+                if self.displays.len() >= 2 || !self.cfg.displays.is_empty() {
+                    section(ui, "Displays", |ui| {
+                        ui.weak("Untick a colour-critical screen, such as one for photo editing, to leave it alone. It keeps its calibration.");
+                        ui.add_space(6.0);
+                        let rows = display_rows(&self.displays, &self.cfg.displays);
+                        egui::Grid::new("displays").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                            for row in &rows {
+                                ui.horizontal(|ui| {
+                                    ui.label(&row.label);
+                                    if !row.connected {
+                                        ui.weak(format!("{} · not connected", row.id));
+                                    } else if row.label != row.id {
+                                        ui.weak(&row.id);
+                                    }
+                                });
+                                let mut tint = config::tints_display(&self.cfg.displays, &row.id);
+                                if ui.checkbox(&mut tint, "Tint this display").changed() {
+                                    config::set_display_tint(&mut self.cfg.displays, &row.id, tint);
+                                }
+                                ui.end_row();
+                            }
+                        });
+                        if !self.per_display {
+                            ui.colored_label(palette::EMBER_HOT, "KDE's Night Light tints every screen, so these settings have no effect here.");
+                        }
+                    });
+                }
+
                 // ── Advanced ───────────────────────────────────────────
                 section(ui, "Advanced", |ui| {
                     egui::Grid::new("adv").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
@@ -935,6 +1009,11 @@ impl eframe::App for SettingsApp {
             && let Some(b) = self.backend.as_mut()
         {
             b.set_preserve_calibration(self.cfg.general.preserve_calibration);
+        }
+        if self.cfg.displays != before.displays
+            && let Some(b) = self.backend.as_mut()
+        {
+            b.set_displays(&self.cfg.displays);
         }
 
         match preview {
@@ -1131,6 +1210,38 @@ mod tests {
         assert_eq!(rec(egui::Key::F13, none).as_deref(), Some("F13"));
         assert_eq!(rec(egui::Key::A, none), None, "needs a modifier");
         assert_eq!(rec(egui::Key::Minus, ctrl_alt), None, "not a supported key");
+    }
+
+    #[test]
+    fn display_rows_list_connected_then_configured() {
+        let connected = vec![
+            (r"\\.\DISPLAY1".to_string(), "DELL U2720Q".to_string()),
+            (
+                r"\\.\DISPLAY2".to_string(),
+                "Generic PnP Monitor".to_string(),
+            ),
+        ];
+        let configured = vec![
+            config::Display {
+                tint: false,
+                ..config::Display::new(r"\\.\display2")
+            },
+            config::Display {
+                tint: false,
+                ..config::Display::new("HDMI-1")
+            },
+        ];
+        let rows = display_rows(&connected, &configured);
+        let ids: Vec<(&str, bool)> = rows.iter().map(|r| (r.id.as_str(), r.connected)).collect();
+        assert_eq!(
+            ids,
+            [
+                (r"\\.\DISPLAY1", true),
+                (r"\\.\DISPLAY2", true),
+                ("HDMI-1", false)
+            ]
+        );
+        assert_eq!(rows[0].label, "DELL U2720Q");
     }
 
     #[test]
