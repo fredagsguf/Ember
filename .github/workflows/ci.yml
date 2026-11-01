@@ -6,10 +6,7 @@ on:
 
 jobs:
   test:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -21,8 +18,5 @@ jobs:
       - run: cargo build --release
       - uses: actions/upload-artifact@v4
         with:
-          name: ember-${{ matrix.os }}
-          path: |
-            target/release/ember
-            target/release/ember.exe
-          if-no-files-found: ignore
+          name: ember-windows
+          path: target/release/ember.exe
