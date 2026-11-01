@@ -18,7 +18,6 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/github/license/fredagsguf/Ember?color=555" alt="MIT license"></a>
-  <a href="https://github.com/fredagsguf/Ember/actions/workflows/ci.yml"><img src="https://github.com/fredagsguf/Ember/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
 </p>
 
 <p align="center">
