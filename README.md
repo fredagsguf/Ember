@@ -129,33 +129,16 @@ Use *Start with Windows* (or *Start at login* on Linux) in the tray menu. Don't 
 
 ## Status and roadmap
 
-Ember is young. Windows 10/11, Linux on X11, and Wayland on wlroots compositors and KDE Plasma are supported. The Linux and Wayland support is new and hasn't been tried on many real machines yet, so bug reports are especially welcome there.
+Ember is young. It runs on Windows 10/11 and on Linux (X11, and Wayland on sway, Hyprland and other wlroots compositors or KDE Plasma). Linux and Wayland support is new, so bug reports are especially welcome there.
 
-**Done**
+Coming next:
 
-- [x] Tray app with per-app rules, timed pause and autostart
-- [x] Settings window with live preview, sunset/sunrise schedule and rule editor, opening above the tray icon
-- [x] Prebuilt releases for Windows and Linux
-- [x] Wayland: wlroots compositors (sway, Hyprland…) via wlr-gamma-control, KDE Plasma via its Night Light
-- [x] Keep your calibration curve instead of resetting to neutral
-- [x] Global hotkey to toggle (Windows and X11)
+- Better Wayland support, including the toggle hotkey
+- A signed Windows app, so there's no "Windows protected your PC" warning
+- Easier installs through winget and Linux package managers
+- Per-monitor settings
 
-**To do**
-
-- [ ] Toggle hotkey on Wayland, through the desktop's global-shortcuts portal
-- [ ] KDE on Wayland: see native Wayland windows for "focused" rules (only XWayland apps today)
-- [ ] Live preview in the settings window on wlroots while Ember is running (it says "unavailable" although the running Ember still applies the preview)
-- [ ] Pick up a calibration curve loaded while Ember is already running, not only at start
-- [ ] Clicking the tray icon while the settings window is open brings it to the front
-- [ ] Code-sign `ember.exe` so Windows stops showing "Windows protected your PC"
-- [ ] Install packages: winget for Windows; AUR, Flatpak or `.deb` for Linux
-- [ ] Per-monitor settings, e.g. leaving a colour-critical screen untouched
-- [ ] Run the Linux tests in CI on every push, not only when releasing
-
-**Not planned**
-
-- GNOME on Wayland: GNOME doesn't let apps change the screen colours. Its built-in Night Light, or an X11 session, is the way to go there.
-- macOS.
+GNOME on Wayland isn't supported, because GNOME doesn't let apps change the screen colours; use its built-in Night Light there. macOS isn't planned.
 
 Ideas and bug reports are welcome in [Issues](https://github.com/fredagsguf/Ember/issues).
 
