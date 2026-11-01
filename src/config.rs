@@ -25,6 +25,8 @@ pub struct General {
     pub poll_interval_secs: u64,
     /// Seconds to fade when switching between rule/normal state. 0 = instant.
     pub fade_secs: f64,
+    /// Global hotkey that pauses/resumes Ember, e.g. "Ctrl+Alt+End". Empty = no hotkey.
+    pub toggle_hotkey: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -101,6 +103,7 @@ impl Default for General {
         General {
             poll_interval_secs: 2,
             fade_secs: 0.5,
+            toggle_hotkey: "Ctrl+Alt+End".into(),
         }
     }
 }
@@ -148,6 +151,8 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        crate::hotkey::Hotkey::parse_config(&self.general.toggle_hotkey)
+            .context("general.toggle_hotkey")?;
         let s = &self.schedule;
         match s.mode {
             ScheduleMode::Solar => match (s.latitude, s.longitude) {
@@ -320,6 +325,13 @@ pub fn edit_text_apply(text: &str, new: &Config) -> Result<String> {
         sync!(t, "fade_secs", o.fade_secs, n.fade_secs, |x: f64| round_to(
             x, 2
         ));
+        sync!(
+            t,
+            "toggle_hotkey",
+            o.toggle_hotkey.as_str(),
+            n.toggle_hotkey.as_str(),
+            |x: &str| x.to_string()
+        );
     }
     let (o, n) = (&old.color, &new.color);
     if o != n {
@@ -589,5 +601,28 @@ temperature = 5000
     #[test]
     fn typos_are_rejected() {
         assert!(Config::parse("[color]\nnight_temp = 3000").is_err());
+        let e = Config::parse("[general]\ntoggle_hotkey = \"Ctrl+Alt+Ennd\"").unwrap_err();
+        assert!(format!("{e:#}").contains("toggle_hotkey"), "{e:#}");
+    }
+
+    #[test]
+    fn toggle_hotkey_defaults_and_can_be_disabled() {
+        assert_eq!(Config::default().general.toggle_hotkey, "Ctrl+Alt+End");
+        let cfg = Config::parse("[general]\ntoggle_hotkey = \"\"").unwrap();
+        assert_eq!(cfg.general.toggle_hotkey, "");
+    }
+
+    #[test]
+    fn apply_writes_toggle_hotkey() {
+        let mut cfg = Config::parse(DEFAULT_CONFIG).unwrap();
+        cfg.general.toggle_hotkey = "Ctrl+Shift+F12".into();
+        let out = edit_text_apply(DEFAULT_CONFIG, &cfg).unwrap();
+        assert_eq!(Config::parse(&out).unwrap(), cfg);
+        assert!(out.contains("toggle_hotkey = \"Ctrl+Shift+F12\""));
+
+        // Missing from the file (older configs): written into [general] when changed.
+        cfg.general.toggle_hotkey = String::new();
+        let out = edit_text_apply("[general]\nfade_secs = 1.0\n", &cfg).unwrap();
+        assert_eq!(Config::parse(&out).unwrap().general.toggle_hotkey, "");
     }
 }

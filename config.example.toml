@@ -6,6 +6,7 @@
 [general]
 poll_interval_secs = 2   # how often to check running games and re-apply colours
 fade_secs = 0.5          # fade when a rule switches on/off (0 = instant)
+toggle_hotkey = "Ctrl+Alt+End" # pause/resume from anywhere, e.g. "Ctrl+Shift+F12"; "" = off
 
 [color]
 day_temperature = 6500   # Kelvin; 6500 = no tint

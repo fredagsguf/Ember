@@ -33,7 +33,7 @@ Warm, dim light in the evening is easier on the eyes and on your sleep. That's w
 - **Per-app rules.** Turn Ember off, or use a different colour, while a specific app is focused or simply running. Add one in two clicks from the tray: open the game, click the tray icon, tick *Disable while "cs2" is focused*.
 - **Follows the sun or your clock.** Warm up at sunset and back at sunrise for your city, or pick fixed times. Every change fades in gently.
 - **Live-preview settings.** Drag a slider and your screen shows that exact colour while you hold it.
-- **Pause when you need to.** Disable for 15 minutes, an hour or three hours, or until you switch it back on.
+- **Pause when you need to.** Disable for 15 minutes, an hour or three hours, or until you switch it back on. Press **Ctrl+Alt+End** from any app to pause or resume (you can change the hotkey in Settings).
 - **Light and private.** One small exe with no installer and no runtime. Ember never connects to the internet: sunset times are calculated on your PC.
 - **Free and open source** under the MIT license.
 
@@ -78,7 +78,7 @@ The moon glows while Ember is warming your screen and turns grey when it isn't (
 | Item | What it does |
 |---|---|
 | *status line* | What Ember is doing now, e.g. `3400K`, `Daytime — no tint`, `Off while Counter-Strike 2`, `Paused for 12 more min` |
-| Enabled | Untick to pause until you tick it again |
+| Enabled | Untick to pause until you tick it again. The toggle hotkey (default **Ctrl+Alt+End**) does the same from anywhere and is shown next to it |
 | Disable for ▸ 15 min / 1 hour / 3 hours | Temporary pause |
 | Disable while "*app*" is focused | Adds or removes a rule for the last app you used |
 | Settings… | Opens the settings window |
@@ -112,7 +112,7 @@ Ember is young. Windows 10/11 and Linux on X11 are supported; Wayland and macOS 
 - [x] Prebuilt Windows releases
 - [ ] Wayland (wlr-gamma-control for sway/Hyprland; GNOME/KDE night-light integration)
 - [ ] macOS
-- [ ] Global hotkey to toggle
+- [x] Global hotkey to toggle
 - [ ] Keep your calibration curve instead of resetting to neutral
 
 Ideas and bug reports are welcome in [Issues](https://github.com/fredagsguf/Ember/issues).
@@ -135,6 +135,7 @@ when = "focused"         # or "running"
 - **Schedule**: `fixed` (clock times with a fade), `solar` (follows the sun at your latitude/longitude), or `always_night`.
 - **Rules**: the first match wins. `when = "focused"` applies only while the app is in the foreground; `"running"` applies as long as it's open. Leave out `temperature` and `brightness` to turn Ember off; set either to use that colour instead (e.g. a movie player at 5000K).
 - Process names are case-insensitive and `.exe` is optional, so one rule works on both Windows and Linux.
+- **Toggle hotkey**: `[general] toggle_hotkey = "Ctrl+Alt+End"` pauses and resumes Ember from any app. Combine `Ctrl`, `Alt`, `Shift` and `Win` (Super on Linux) with a letter, digit, `F1`–`F24`, `End`, `Home`, `Insert`, `Delete`, `PageUp`, `PageDown`, `Pause`, `ScrollLock`, an arrow key (`Left`, `Right`, `Up`, `Down`) or `Space`. `F13`–`F24`, `Pause` and `ScrollLock` also work without a modifier. Set it to `""` to turn the hotkey off. If another app already uses the combination, Ember logs a warning and carries on without it. On Linux it needs X11.
 
 Command-line options:
 
@@ -158,7 +159,7 @@ cargo test
 cargo clippy --all-targets
 ```
 
-Layout: `src/lib.rs` is the library; `src/bin/ember/` is the tray app (`windows.rs` uses `tray-icon`, `linux.rs` uses `ksni`, `settings.rs` is the egui settings window). Library pieces: `daemon.rs` (run loop, single-instance lock), `tray_model.rs` (menu state, actions, icon drawing), `autostart.rs`, `color.rs` (Kelvin → RGB → gamma ramp), `solar.rs` (sun elevation), `schedule.rs`, `rules.rs` (per-app matching), `engine.rs` (decision + process watching), `gamma/` (platform backends).
+Layout: `src/lib.rs` is the library; `src/bin/ember/` is the tray app (`windows.rs` uses `tray-icon`, `linux.rs` uses `ksni`, `settings.rs` is the egui settings window). Library pieces: `daemon.rs` (run loop, single-instance lock), `tray_model.rs` (menu state, actions, icon drawing), `autostart.rs`, `color.rs` (Kelvin → RGB → gamma ramp), `solar.rs` (sun elevation), `schedule.rs`, `rules.rs` (per-app matching), `engine.rs` (decision + process watching), `hotkey.rs` (parsing the toggle hotkey; registering it is per platform in `windows.rs`/`linux.rs`), `gamma/` (platform backends).
 
 The logo is drawn in code (`icon_rgba` in `tray_model.rs`). `assets/ember.ico`, embedded in the exe, is generated from it with `cargo run --example make_ico`.
 

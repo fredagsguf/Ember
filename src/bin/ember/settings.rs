@@ -5,6 +5,7 @@ use anyhow::{Result, anyhow};
 use eframe::egui::{self, Color32, CornerRadius, RichText, SliderClamping, Stroke, Ui};
 use ember::color::{self, ColorSetting};
 use ember::config::{self, Config, Rule, ScheduleMode, When};
+use ember::hotkey::Hotkey;
 use ember::tray_model::Anchor;
 use ember::{engine, gamma, schedule, tray_model};
 use std::fs::File;
@@ -88,6 +89,10 @@ struct SettingsApp {
     anchor: Option<Anchor>,
     first_frame: bool,
     logo: Option<egui::TextureHandle>,
+    /// Waiting for the user to press a new toggle hotkey.
+    recording_hotkey: bool,
+    /// Why the last key combination pressed can't be used.
+    hotkey_error: Option<String>,
 }
 
 /// Offline shortcut for setting a location. Sorted by name.
@@ -327,6 +332,8 @@ impl SettingsApp {
             anchor,
             first_frame: true,
             logo: None,
+            recording_hotkey: false,
+            hotkey_error: None,
         };
         me.sync_proc_text();
         me.refresh_running_apps();
@@ -486,6 +493,79 @@ fn time_edit(ui: &mut Ui, id: &str, hhmm: &mut String) -> bool {
         *hhmm = format!("{h:02}:{m:02}");
     }
     changed
+}
+
+/// The toggle hotkey: a button that, once clicked, records the next key combination pressed.
+/// Escape cancels; Backspace or Delete on its own turns the hotkey off.
+fn hotkey_button(
+    ui: &mut Ui,
+    value: &mut String,
+    recording: &mut bool,
+    error: &mut Option<String>,
+) {
+    if *recording {
+        // Take the key events before any widget sees them, so e.g. Space doesn't click the button.
+        let pressed = ui.input_mut(|i| {
+            let found = i.events.iter().find_map(|e| match e {
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } => Some((*key, *modifiers)),
+                _ => None,
+            });
+            i.events
+                .retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)));
+            found
+        });
+        if let Some((key, m)) = pressed {
+            *error = None;
+            let plain = !(m.ctrl || m.alt || m.shift);
+            match key {
+                egui::Key::Escape => *recording = false,
+                egui::Key::Backspace | egui::Key::Delete if plain => {
+                    value.clear();
+                    *recording = false;
+                }
+                // Keep recording after a bad combination so the user can just try another.
+                _ => match recorded_hotkey(key, m) {
+                    Ok(h) => {
+                        *value = h.to_string();
+                        *recording = false;
+                    }
+                    Err(e) => *error = Some(format!("{e:#}")),
+                },
+            }
+        }
+    }
+    let text = if *recording {
+        RichText::new("Press a key combination…").color(palette::EMBER_HOT)
+    } else if value.is_empty() {
+        RichText::new("None")
+    } else {
+        RichText::new(value.as_str())
+    };
+    let hint = "Pauses or resumes Ember from any app. Click, then press the keys. \
+                Esc cancels, Backspace turns the hotkey off. \
+                To use the Win (Super) key, edit toggle_hotkey in the config file.";
+    if ui.button(text).on_hover_text(hint).clicked() {
+        *recording = !*recording;
+        *error = None;
+    }
+}
+
+/// The hotkey for `key` pressed with modifiers `m`. egui's key names match the config's.
+fn recorded_hotkey(key: egui::Key, m: egui::Modifiers) -> Result<Hotkey> {
+    let mut text = String::new();
+    for (on, name) in [(m.ctrl, "Ctrl+"), (m.alt, "Alt+"), (m.shift, "Shift+")] {
+        if on {
+            text.push_str(name);
+        }
+    }
+    text.push_str(key.name());
+    text.parse()
 }
 
 fn section(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
@@ -736,7 +816,13 @@ impl eframe::App for SettingsApp {
                         ui.label("Check apps every");
                         ui.add(egui::Slider::new(&mut g.poll_interval_secs, 1..=10).suffix(" s"));
                         ui.end_row();
+                        ui.label("Toggle hotkey");
+                        hotkey_button(ui, &mut g.toggle_hotkey, &mut self.recording_hotkey, &mut self.hotkey_error);
+                        ui.end_row();
                     });
+                    if let Some(e) = &self.hotkey_error {
+                        ui.colored_label(palette::ERROR, e);
+                    }
                     ui.horizontal(|ui| {
                         if ui.button("Open config file").clicked() {
                             let _ = config::ensure_exists(&self.path);
@@ -939,6 +1025,36 @@ mod tests {
             1080.0 - 680.0 - SCREEN_GAP,
             "clamped above the bottom edge"
         );
+    }
+
+    #[test]
+    fn records_hotkeys_from_egui_key_presses() {
+        let ctrl_alt = egui::Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Default::default()
+        };
+        let none = egui::Modifiers::NONE;
+        let rec = |k, m| recorded_hotkey(k, m).map(|h| h.to_string()).ok();
+        assert_eq!(
+            rec(egui::Key::End, ctrl_alt).as_deref(),
+            Some("Ctrl+Alt+End")
+        );
+        assert_eq!(
+            rec(egui::Key::ArrowLeft, ctrl_alt).as_deref(),
+            Some("Ctrl+Alt+Left")
+        );
+        assert_eq!(
+            rec(egui::Key::Num7, ctrl_alt).as_deref(),
+            Some("Ctrl+Alt+7")
+        );
+        assert_eq!(
+            rec(egui::Key::PageDown, ctrl_alt).as_deref(),
+            Some("Ctrl+Alt+PageDown")
+        );
+        assert_eq!(rec(egui::Key::F13, none).as_deref(), Some("F13"));
+        assert_eq!(rec(egui::Key::A, none), None, "needs a modifier");
+        assert_eq!(rec(egui::Key::Minus, ctrl_alt), None, "not a supported key");
     }
 
     #[test]
