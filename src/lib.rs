@@ -7,6 +7,7 @@ pub mod config;
 pub mod daemon;
 pub mod engine;
 pub mod gamma;
+pub mod hotkey;
 pub mod rules;
 pub mod schedule;
 pub mod solar;

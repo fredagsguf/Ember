@@ -3,6 +3,7 @@
 
 use crate::daemon::{Handle, State};
 use crate::engine::{self, Reason};
+use crate::hotkey::Hotkey;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
@@ -72,11 +73,25 @@ pub struct View {
     /// (label, checked) for "Disable while <app> is focused".
     pub app_rule: Option<(String, bool)>,
     pub autostart: bool,
+    /// The configured pause/resume hotkey, shown next to "Enabled".
+    pub hotkey: Option<Hotkey>,
+}
+
+/// The pause/resume hotkey in the config the daemon is running with. `None` until the daemon
+/// has loaded it, or if it's turned off.
+pub fn hotkey(state: &State) -> Option<Hotkey> {
+    match state {
+        State::Running(s) => Hotkey::parse_config(&s.config.general.toggle_hotkey)
+            .ok()
+            .flatten(),
+        _ => None,
+    }
 }
 
 pub fn view(state: &State) -> View {
     let enabled = engine::paused().is_none();
     let autostart = crate::autostart::is_enabled();
+    let hotkey = hotkey(state);
     match state {
         State::Starting => View {
             status: "Starting…".into(),
@@ -85,6 +100,7 @@ pub fn view(state: &State) -> View {
             enabled,
             app_rule: None,
             autostart,
+            hotkey,
         },
         State::Failed(e) => View {
             status: format!("Error: {}", truncate(e, 60)),
@@ -93,6 +109,7 @@ pub fn view(state: &State) -> View {
             enabled,
             app_rule: None,
             autostart,
+            hotkey,
         },
         State::Running(s) => {
             let k = s.setting.temperature;
@@ -120,6 +137,7 @@ pub fn view(state: &State) -> View {
                 enabled,
                 app_rule,
                 autostart,
+                hotkey,
             }
         }
     }
