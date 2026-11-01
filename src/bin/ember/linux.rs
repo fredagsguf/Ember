@@ -1,8 +1,11 @@
 //! Linux tray icon via the StatusNotifierItem D-Bus protocol (KDE, XFCE, Cinnamon, sway/waybar,
 //! GNOME with the AppIndicator extension).
 
+mod portal;
+
 use anyhow::{Context, Result, anyhow};
 use ember::daemon::Handle;
+use ember::gamma::session;
 use ember::hotkey::{Hotkey, Key, Modifiers};
 use ember::tray_model::{self, Action, DISABLE_OPTIONS, View};
 use ksni::blocking::TrayMethods;
@@ -20,6 +23,9 @@ struct EmberTray {
     daemon: Handle,
     config_path: PathBuf,
     quit: Sender<()>,
+    /// The toggle hotkey as it's actually registered (X11 grab or portal shortcut), shown next
+    /// to "Enabled". `None` if there's no hotkey or registering it failed.
+    hotkey_bound: Option<Hotkey>,
 }
 
 impl EmberTray {
@@ -82,7 +88,7 @@ impl ksni::Tray for EmberTray {
             CheckmarkItem {
                 label: "Enabled".into(),
                 checked: v.enabled,
-                shortcut: v.hotkey.map(dbus_shortcut).into_iter().collect(),
+                shortcut: self.hotkey_bound.map(dbus_shortcut).into_iter().collect(),
                 activate: Box::new(|t: &mut Self| t.act(Action::ToggleEnabled)),
                 ..Default::default()
             }
@@ -160,6 +166,7 @@ pub fn run(daemon: Handle, config_path: PathBuf) -> Result<()> {
         daemon: daemon.clone(),
         config_path,
         quit: quit_tx,
+        hotkey_bound: None,
     };
     let handle = tray.spawn().map_err(|e| {
         anyhow!(
@@ -172,9 +179,21 @@ pub fn run(daemon: Handle, config_path: PathBuf) -> Result<()> {
         std::thread::Builder::new()
             .name("ember-hotkey".into())
             .spawn(move || {
-                if let Err(e) = watch_hotkey(&daemon, &tray) {
+                let env = |k: &str| std::env::var(k).ok();
+                // Wayland apps can't grab keys (an X11 grab only fires while an XWayland window
+                // has focus), so there the desktop portal binds a global shortcut instead.
+                let r = if session::is_wayland(
+                    env("WAYLAND_DISPLAY").as_deref(),
+                    env("XDG_SESSION_TYPE").as_deref(),
+                ) {
+                    portal::watch_hotkey(&daemon, &tray)
+                } else {
+                    watch_hotkey(&daemon, &tray)
+                };
+                if let Err(e) = r {
                     log::warn!("toggle hotkey stopped working: {e:#}");
                 }
+                tray.update(|t| t.hotkey_bound = None);
             })
             .context("spawning hotkey thread")?;
     }
@@ -325,7 +344,7 @@ impl Grab {
 }
 
 /// Toggle Ember when the configured hotkey is pressed anywhere, following config changes.
-/// Returns when the tray goes away. Without an X display (e.g. pure Wayland) it logs and returns.
+/// Returns when the tray goes away. Without an X display it logs and returns.
 fn watch_hotkey(daemon: &Handle, tray: &ksni::blocking::Handle<EmberTray>) -> Result<()> {
     let (conn, screen) = match x11rb::connect(None) {
         Ok(c) => c,
@@ -345,13 +364,18 @@ fn watch_hotkey(daemon: &Handle, tray: &ksni::blocking::Handle<EmberTray>) -> Re
             if let Some(g) = grab.take() {
                 g.release(&conn);
             }
+            let mut bound = None;
             match h.map(|h| (h, Grab::new(&conn, root, h))) {
                 None => log::info!("toggle hotkey off"),
                 Some((h, Ok(g))) => {
                     log::info!("toggle hotkey: {h}");
                     grab = Some(g);
+                    bound = Some(h);
                 }
                 Some((h, Err(e))) => log::warn!("could not grab the toggle hotkey {h}: {e:#}"),
+            }
+            if tray.update(|t| t.hotkey_bound = bound).is_none() {
+                return Ok(()); // tray service is gone
             }
         }
         while let Some(ev) = conn.poll_for_event()? {

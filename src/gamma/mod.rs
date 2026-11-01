@@ -10,7 +10,7 @@ mod kwin;
 #[cfg(target_os = "linux")]
 mod kwin_script;
 #[cfg(target_os = "linux")]
-mod session;
+pub mod session;
 #[cfg(windows)]
 mod windows;
 #[cfg(target_os = "linux")]
