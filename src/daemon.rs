@@ -12,6 +12,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
+/// How long to fade when the scheduled colour jumps instead of drifting (see [`is_jump`]).
+const JUMP_FADE_SECS: f64 = 5.0;
+
 /// Processes that are "the desktop", not an app the user would want a rule for.
 /// Used so that clicking the tray icon doesn't make the taskbar the "current app".
 const SHELL_PROCESSES: &[&str] = &[
@@ -216,19 +219,25 @@ fn run_locked(opts: &Options, rx: Receiver<Msg>, state: &Mutex<State>) -> Result
             && last_reason.as_ref() != Some(&d.reason)
             && d.reason != Reason::Preview
             && last_reason != Some(Reason::Preview);
+        // The schedule can still jump: Ember starting in the evening (the screen is neutral until
+        // now), waking from sleep, or an edited schedule. Fade those too instead of snapping.
+        let from = current.unwrap_or(ColorSetting::NEUTRAL);
+        let schedule_jump = d.reason == Reason::Schedule
+            && matches!(last_reason, None | Some(Reason::Schedule))
+            && is_jump(from, d.setting);
+        let fade_secs = if state_changed {
+            cfg.general.fade_secs
+        } else if schedule_jump {
+            JUMP_FADE_SECS
+        } else {
+            0.0
+        };
         let mut stop = false;
-        match current {
-            Some(from) if state_changed && cfg.general.fade_secs > 0.0 => {
-                stop = fade(
-                    backend.as_mut(),
-                    from,
-                    d.setting,
-                    cfg.general.fade_secs,
-                    &rx,
-                )
-            }
+        if fade_secs > 0.0 {
+            stop = fade(backend.as_mut(), from, d.setting, fade_secs, &rx);
+        } else {
             // Re-apply every tick: games, driver resets and display hot-plugs can clobber the ramp.
-            _ => apply(backend.as_mut(), d.setting),
+            apply(backend.as_mut(), d.setting);
         }
         current = Some(d.setting);
         last_reason = Some(d.reason.clone());
@@ -273,6 +282,12 @@ fn apply(backend: &mut dyn Backend, s: ColorSetting) {
     }
 }
 
+/// Whether going from `a` to `b` is a jump rather than one step of a gradual schedule transition.
+/// Even a 1-minute transition moves only about 100K (or 0.03 brightness) per 2-second poll.
+fn is_jump(a: ColorSetting, b: ColorSetting) -> bool {
+    a.temperature.abs_diff(b.temperature) > 150 || (a.brightness - b.brightness).abs() > 0.05
+}
+
 /// Returns true if a stop was requested during the fade.
 fn fade(
     backend: &mut dyn Backend,
@@ -293,5 +308,32 @@ fn fade(
             Ok(Msg::Stop) | Err(RecvTimeoutError::Disconnected) => return true,
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn k(temperature: u32, brightness: f32) -> ColorSetting {
+        ColorSetting {
+            temperature,
+            brightness,
+        }
+    }
+
+    #[test]
+    fn gradual_schedule_steps_are_not_jumps() {
+        // A 45-minute 6500K -> 3400K transition polled every 2 s.
+        assert!(!is_jump(k(6500, 1.0), k(6498, 1.0)));
+        // A 1-minute transition, also with brightness going 1.0 -> 0.1.
+        assert!(!is_jump(k(6500, 1.0), k(6397, 0.97)));
+    }
+
+    #[test]
+    fn evening_start_and_wake_from_sleep_are_jumps() {
+        assert!(is_jump(ColorSetting::NEUTRAL, k(3400, 1.0)));
+        assert!(is_jump(k(3400, 1.0), k(6500, 1.0)));
+        assert!(is_jump(k(6500, 1.0), k(6500, 0.7)));
     }
 }
