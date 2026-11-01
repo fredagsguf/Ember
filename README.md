@@ -69,7 +69,7 @@ Works on X11, and on Wayland with KDE Plasma, sway, Hyprland and other wlroots c
 Click the tray icon to open the settings, right above the icon. Drag a slider and your screen shows that colour while you hold it. Changes save on their own.
 
 <p align="center">
-  <img src="docs/settings.png" width="760" alt="Ember's settings window: colour sliders and schedule on the left; app and game rules on the right, with one-tick options for fullscreen apps, Steam games and video players, and a rule for Counter-Strike 2">
+  <img src="docs/settings.png" width="860" alt="Ember's settings window: colour sliders and schedule on the left; on the right, Apps &amp; games with one-tick options for fullscreen apps, Steam games and video players, and a rule that turns Ember off for fullscreen windows">
 </p>
 
 Right-click the tray icon for the menu: pause, *Disable while "app" is focused* for the app you just used, start at login, and quit. The moon glows while Ember is tinting your screen, and hovering over it shows when the next change happens.

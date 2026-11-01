@@ -152,7 +152,9 @@ processes = ["cs2"]
     Start-Sleep 1
     $grab = {
         $r = [Win]::Frame($h)
-        $bmp = New-Object System.Drawing.Bitmap ($r.Right - $r.Left), ($r.Bottom - $r.Top)
+        # The window can be taller than the runner's screen; stop at the taskbar.
+        $bottom = [Math]::Min($r.Bottom, [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea.Bottom)
+        $bmp = New-Object System.Drawing.Bitmap ($r.Right - $r.Left), ($bottom - $r.Top)
         $g = [System.Drawing.Graphics]::FromImage($bmp)
         $g.CopyFromScreen($r.Left, $r.Top, 0, 0, $bmp.Size)
         $g.Dispose()
@@ -161,7 +163,7 @@ processes = ["cs2"]
     $top = & $grab
     $r = [Win]::Frame($h)
     [Win]::SetCursorPos([int](($r.Left + $r.Right) / 2), [int](($r.Top + $r.Bottom) / 2)) | Out-Null
-    for ($k = 0; $k -lt 4; $k++) {
+    for ($k = 0; $k -lt 3; $k++) {
         [Win]::mouse_event(0x0800, 0, 0, -480, [UIntPtr]::Zero)
         Start-Sleep -Milliseconds 400
     }
