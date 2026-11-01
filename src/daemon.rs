@@ -1,4 +1,4 @@
-//! The long-running loop shared by `ember run` and `ember-tray`.
+//! The long-running loop behind the tray app.
 
 use crate::color::{self, ColorSetting};
 use crate::config::{self, Config};
@@ -17,7 +17,6 @@ use std::time::{Duration, Instant, SystemTime};
 const SHELL_PROCESSES: &[&str] = &[
     "explorer",
     "ember",
-    "ember-tray",
     "shellexperiencehost",
     "startmenuexperiencehost",
     "searchhost",
@@ -117,7 +116,7 @@ fn single_instance_lock() -> Result<File> {
     match f.try_lock() {
         Ok(()) => Ok(f),
         Err(std::fs::TryLockError::WouldBlock) => {
-            bail!("another Ember instance is already running (ember run or ember-tray)")
+            bail!("another Ember instance is already running")
         }
         Err(std::fs::TryLockError::Error(e)) => Err(e).context("locking instance file"),
     }

@@ -1,7 +1,7 @@
 # Ember configuration.
 # Linux:   ~/.config/ember/config.toml
 # Windows: %APPDATA%\ember\config\config.toml
-# Run `ember config-path` to see where Ember looks. Changes are picked up live.
+# The tray menu's "Open config file" opens this file. Changes are picked up live.
 
 [general]
 poll_interval_secs = 2   # how often to check running games and re-apply colours

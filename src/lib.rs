@@ -1,5 +1,5 @@
 //! Ember — an open-source f.lux alternative with per-app rules.
-//! The `ember` CLI and the `ember-tray` app are thin front-ends over this library.
+//! The `ember` tray app (`src/bin/ember/`) is a thin front-end over this library.
 
 pub mod autostart;
 pub mod color;

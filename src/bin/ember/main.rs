@@ -1,4 +1,4 @@
-//! `ember-tray` — Ember with a system tray icon. No console window on Windows.
+//! `ember` — Ember with a system tray icon. No console window on Windows.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
@@ -13,7 +13,11 @@ mod settings;
 mod windows;
 
 #[derive(Parser)]
-#[command(name = "ember-tray", version, about = "Ember in the system tray")]
+#[command(
+    name = "ember",
+    version,
+    about = "Warm your screen at night — and stay out of the way while you game."
+)]
 struct Cli {
     /// Path to config file (default: platform config dir)
     #[arg(short, long)]
@@ -79,6 +83,6 @@ fn fatal(msg: &str) -> ! {
     #[cfg(windows)]
     windows::message_box(msg);
     #[cfg(not(windows))]
-    eprintln!("ember-tray: {msg}");
+    eprintln!("ember: {msg}");
     std::process::exit(1)
 }

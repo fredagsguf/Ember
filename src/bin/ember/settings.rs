@@ -1,4 +1,4 @@
-//! The settings window (`ember-tray --settings`). Runs as its own process, edits config.toml,
+//! The settings window (`ember --settings`). Runs as its own process, edits config.toml,
 //! and previews slider values on screen while you drag them.
 
 use anyhow::{Result, anyhow};

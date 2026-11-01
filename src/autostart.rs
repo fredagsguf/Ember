@@ -66,8 +66,7 @@ mod imp {
     use std::path::PathBuf;
 
     fn desktop_file() -> Option<PathBuf> {
-        directories::BaseDirs::new()
-            .map(|d| d.config_dir().join("autostart").join("ember-tray.desktop"))
+        directories::BaseDirs::new().map(|d| d.config_dir().join("autostart").join("ember.desktop"))
     }
 
     pub fn is_enabled() -> bool {

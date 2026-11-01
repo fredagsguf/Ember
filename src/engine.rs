@@ -81,7 +81,7 @@ impl ProcessWatcher {
             .map(|p| rules::normalize(&p.name().to_string_lossy()))
     }
 
-    /// All running processes, for `ember processes`.
+    /// All running processes, for the settings window's app picker.
     pub fn all_names(&mut self) -> Vec<String> {
         self.sys.refresh_processes_specifics(
             ProcessesToUpdate::All,

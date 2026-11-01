@@ -158,8 +158,7 @@ pub fn run(daemon: Handle, config_path: PathBuf) -> Result<()> {
     let handle = tray.spawn().map_err(|e| {
         anyhow!(
             "could not create a tray icon ({e}). Your desktop needs a StatusNotifierItem tray \
-             (on GNOME: install the \"AppIndicator and KStatusNotifierItem Support\" extension). \
-             You can use `ember run` without a tray instead."
+             (on GNOME: install the \"AppIndicator and KStatusNotifierItem Support\" extension)."
         )
     })?;
 
