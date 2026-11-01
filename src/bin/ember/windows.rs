@@ -2,12 +2,15 @@
 
 use anyhow::{Context, Result};
 use ember::daemon::Handle;
-use ember::tray_model::{self, Action, DISABLE_OPTIONS, View};
+use ember::tray_model::{self, Action, Anchor, DISABLE_OPTIONS, View};
 use std::path::PathBuf;
 use tray_icon::menu::{
     CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
 };
-use tray_icon::{Icon, TrayIconBuilder};
+use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use windows_sys::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, MB_ICONERROR, MB_OK, MSG, MessageBoxW, MsgWaitForMultipleObjects, PM_REMOVE,
     PeekMessageW, QS_ALLINPUT, TranslateMessage, WM_QUIT,
@@ -32,6 +35,9 @@ fn icon(active: bool) -> Result<Icon> {
 }
 
 pub fn run(daemon: Handle, config_path: PathBuf) -> Result<()> {
+    // Report the tray icon's position in real pixels, the same units the settings window
+    // (winit) uses; otherwise Windows scales it on high-DPI displays.
+    unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     let status = MenuItem::new("Starting…", false, None);
     let enabled = CheckMenuItem::new("Enabled", true, true, None);
     let disable_items: Vec<(MenuItem, u64)> = DISABLE_OPTIONS
@@ -63,14 +69,18 @@ pub fn run(daemon: Handle, config_path: PathBuf) -> Result<()> {
         &quit,
     ])?;
 
+    // Left-click opens the settings window above the icon; right-click shows the menu.
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
+        .with_menu_on_left_click(false)
         .with_tooltip("Ember")
         .with_icon(icon(false)?)
         .build()
         .context("creating tray icon")?;
+    // Where the icon was when last clicked, so "Settings…" in the menu opens next to it too.
+    let mut anchor: Option<Anchor> = None;
 
-    let action_for = |id: &MenuId| -> Option<Action> {
+    let action_for = |id: &MenuId, anchor: Option<Anchor>| -> Option<Action> {
         if id == enabled.id() {
             Some(Action::ToggleEnabled)
         } else if id == app.id() {
@@ -78,7 +88,7 @@ pub fn run(daemon: Handle, config_path: PathBuf) -> Result<()> {
         } else if id == autostart.id() {
             Some(Action::ToggleAutostart)
         } else if id == settings.id() {
-            Some(Action::OpenSettings)
+            Some(Action::OpenSettings(anchor))
         } else if id == open_cfg.id() {
             Some(Action::OpenConfig)
         } else if id == quit.id() {
@@ -106,10 +116,30 @@ pub fn run(daemon: Handle, config_path: PathBuf) -> Result<()> {
             }
         }
 
+        let mut actions = Vec::new();
+        while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
+            if let TrayIconEvent::Click {
+                rect,
+                button,
+                button_state: MouseButtonState::Up,
+                ..
+            } = ev
+            {
+                anchor = Some(Anchor {
+                    x: rect.position.x.round() as i32,
+                    y: rect.position.y.round() as i32,
+                    width: rect.size.width as i32,
+                    height: rect.size.height as i32,
+                });
+                if button == MouseButton::Left {
+                    actions.push(Action::OpenSettings(anchor));
+                }
+            }
+        }
         while let Ok(ev) = MenuEvent::receiver().try_recv() {
-            let Some(action) = action_for(ev.id()) else {
-                continue;
-            };
+            actions.extend(action_for(ev.id(), anchor));
+        }
+        for action in actions {
             match tray_model::perform(action, &daemon, &config_path) {
                 Ok(true) => return Ok(()),
                 Ok(false) => {}

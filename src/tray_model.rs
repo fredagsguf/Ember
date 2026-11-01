@@ -14,9 +14,47 @@ pub enum Action {
     /// Add/remove a disable rule for the most recently used app.
     ToggleAppRule,
     ToggleAutostart,
-    OpenSettings,
+    /// Open the settings window, next to the tray icon if we know where it is.
+    OpenSettings(Option<Anchor>),
     OpenConfig,
     Quit,
+}
+
+/// Where the tray icon is on screen, in physical pixels. Passed to the settings window as
+/// `--anchor x,y,width,height` so it can open right next to the icon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Anchor {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+impl std::fmt::Display for Anchor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{},{},{},{}", self.x, self.y, self.width, self.height)
+    }
+}
+
+impl std::str::FromStr for Anchor {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let n: Vec<i32> = s
+            .split(',')
+            .map(|p| p.trim().parse())
+            .collect::<Result<_, _>>()
+            .map_err(|_| format!("expected x,y,width,height, got {s:?}"))?;
+        match n[..] {
+            [x, y, width, height] => Ok(Anchor {
+                x,
+                y,
+                width,
+                height,
+            }),
+            _ => Err(format!("expected x,y,width,height, got {s:?}")),
+        }
+    }
 }
 
 pub const DISABLE_OPTIONS: &[(u64, &str)] = &[(15, "15 minutes"), (60, "1 hour"), (180, "3 hours")];
@@ -127,13 +165,14 @@ pub fn perform(action: Action, daemon: &Handle, config_path: &Path) -> Result<bo
             }
         }
         Action::ToggleAutostart => crate::autostart::set_enabled(!crate::autostart::is_enabled())?,
-        Action::OpenSettings => {
+        Action::OpenSettings(anchor) => {
             let exe = std::env::current_exe()?;
-            std::process::Command::new(exe)
-                .arg("--settings")
-                .arg("--config")
-                .arg(config_path)
-                .spawn()?;
+            let mut cmd = std::process::Command::new(exe);
+            cmd.arg("--settings").arg("--config").arg(config_path);
+            if let Some(a) = anchor {
+                cmd.arg("--anchor").arg(a.to_string());
+            }
+            cmd.spawn()?;
         }
         Action::OpenConfig => {
             crate::config::ensure_exists(config_path)?;
@@ -293,6 +332,19 @@ mod tests {
                 "inactive is grey"
             );
         }
+    }
+
+    #[test]
+    fn anchor_round_trips_through_its_argument() {
+        let a = Anchor {
+            x: 1830,
+            y: -1040,
+            width: 24,
+            height: 32,
+        };
+        assert_eq!(a.to_string().parse::<Anchor>(), Ok(a));
+        assert!("1,2,3".parse::<Anchor>().is_err());
+        assert!("1,2,3,x".parse::<Anchor>().is_err());
     }
 
     #[test]

@@ -28,6 +28,9 @@ struct Cli {
     /// Open the settings window instead of the tray
     #[arg(long)]
     settings: bool,
+    /// Tray icon position (x,y,width,height in physical pixels) to open the settings window at
+    #[arg(long, hide = true, requires = "settings")]
+    anchor: Option<ember::tray_model::Anchor>,
 }
 
 fn init_logging(file_name: &str) {
@@ -50,7 +53,7 @@ fn main() {
         .unwrap_or_else(ember::config::default_config_path);
     if cli.settings {
         init_logging("settings.log");
-        if let Err(e) = settings::run(config_path) {
+        if let Err(e) = settings::run(config_path, cli.anchor) {
             fatal(&format!("{e:#}"));
         }
         return;

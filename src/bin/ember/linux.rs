@@ -117,7 +117,7 @@ impl ksni::Tray for EmberTray {
             MenuItem::Separator,
             StandardItem {
                 label: "Settings…".into(),
-                activate: Box::new(|t: &mut Self| t.act(Action::OpenSettings)),
+                activate: Box::new(|t: &mut Self| t.act(Action::OpenSettings(None))),
                 ..Default::default()
             }
             .into(),

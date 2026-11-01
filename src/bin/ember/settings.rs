@@ -2,9 +2,10 @@
 //! and previews slider values on screen while you drag them.
 
 use anyhow::{Result, anyhow};
-use eframe::egui::{self, Color32, RichText, SliderClamping, Ui};
+use eframe::egui::{self, Color32, CornerRadius, RichText, SliderClamping, Stroke, Ui};
 use ember::color::{self, ColorSetting};
 use ember::config::{self, Config, Rule, ScheduleMode, When};
+use ember::tray_model::Anchor;
 use ember::{engine, gamma, schedule, tray_model};
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -14,7 +15,10 @@ use std::time::{Duration, Instant, SystemTime};
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(400);
 const PREVIEW_REFRESH: Duration = Duration::from_millis(250);
 
-pub fn run(config_path: PathBuf) -> Result<()> {
+/// Space between the window and the taskbar / screen edges, in points.
+const SCREEN_GAP: f32 = 12.0;
+
+pub fn run(config_path: PathBuf, anchor: Option<Anchor>) -> Result<()> {
     // Only one settings window at a time.
     let lock_path = config::state_dir().join("settings.lock");
     std::fs::create_dir_all(config::state_dir())?;
@@ -32,15 +36,22 @@ pub fn run(config_path: PathBuf) -> Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Ember settings")
-            .with_inner_size([560.0, 720.0])
+            .with_inner_size([520.0, 680.0])
             .with_min_inner_size([420.0, 400.0])
             .with_icon(icon),
         ..Default::default()
     };
-    let app = SettingsApp::new(config_path);
+    let app = SettingsApp::new(config_path, anchor);
     // winit panics (rather than erroring) when e.g. libxkbcommon-x11 is missing; report it cleanly.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        eframe::run_native("Ember settings", options, Box::new(|_cc| Ok(Box::new(app))))
+        eframe::run_native(
+            "Ember settings",
+            options,
+            Box::new(|cc| {
+                apply_theme(&cc.egui_ctx);
+                Ok(Box::new(app))
+            }),
+        )
     }));
     match result {
         Ok(r) => r.map_err(|e| anyhow!("could not open the settings window: {e}"))?,
@@ -73,6 +84,10 @@ struct SettingsApp {
     last_preview_write: Option<Instant>,
     running_apps: Vec<String>,
     new_app: String,
+    /// The tray icon this window was opened from; it's moved next to it on the first frame.
+    anchor: Option<Anchor>,
+    first_frame: bool,
+    logo: Option<egui::TextureHandle>,
 }
 
 /// Offline shortcut for setting a location. Sorted by name.
@@ -124,8 +139,155 @@ fn mtime(p: &Path) -> Option<SystemTime> {
     std::fs::metadata(p).and_then(|m| m.modified()).ok()
 }
 
+/// Where a window of `size` should go so it sits next to the tray `icon`: just above a bottom
+/// taskbar, below a top one, beside a side one, and always inside `work` (the screen minus the
+/// taskbar).
+fn place_near(icon: egui::Rect, work: egui::Rect, size: egui::Vec2) -> egui::Pos2 {
+    let g = SCREEN_GAP;
+    let pos = if icon.min.y >= work.max.y {
+        egui::pos2(icon.center().x - size.x / 2.0, work.max.y - size.y - g)
+    } else if icon.max.y <= work.min.y {
+        egui::pos2(icon.center().x - size.x / 2.0, work.min.y + g)
+    } else if icon.min.x >= work.max.x {
+        egui::pos2(work.max.x - size.x - g, icon.center().y - size.y / 2.0)
+    } else if icon.max.x <= work.min.x {
+        egui::pos2(work.min.x + g, icon.center().y - size.y / 2.0)
+    } else {
+        // The icon is inside the work area, e.g. in the taskbar's "^" overflow flyout.
+        egui::pos2(icon.center().x - size.x / 2.0, icon.min.y - size.y - g)
+    };
+    let max = (work.max - size - egui::vec2(g, g)).max(work.min);
+    pos.clamp(work.min + egui::vec2(g, g), max)
+}
+
+/// The usable area (screen minus taskbar) of the monitor containing `a`, in physical pixels.
+#[cfg(windows)]
+fn work_area(a: Anchor) -> Option<egui::Rect> {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
+    };
+    let centre = POINT {
+        x: a.x + a.width / 2,
+        y: a.y + a.height / 2,
+    };
+    let mut info: MONITORINFO = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+    let ok = unsafe {
+        GetMonitorInfoW(
+            MonitorFromPoint(centre, MONITOR_DEFAULTTONEAREST),
+            &mut info,
+        )
+    };
+    let r = info.rcWork;
+    (ok != 0).then(|| {
+        egui::Rect::from_min_max(
+            egui::pos2(r.left as f32, r.top as f32),
+            egui::pos2(r.right as f32, r.bottom as f32),
+        )
+    })
+}
+
+#[cfg(not(windows))]
+fn work_area(_: Anchor) -> Option<egui::Rect> {
+    None
+}
+
+/// Move (and if needed shrink) the window so it opens next to the tray icon it was opened from.
+fn move_next_to(ctx: &egui::Context, anchor: Anchor) {
+    let (outer, inner) = ctx.input(|i| (i.viewport().outer_rect, i.viewport().inner_rect));
+    let (Some(outer), Some(work)) = (outer, work_area(anchor)) else {
+        return;
+    };
+    // Physical pixels -> points. egui turns the position back into pixels with the same scale.
+    let ppp = ctx.pixels_per_point();
+    let work = egui::Rect::from_min_max(work.min / ppp, work.max / ppp);
+    let icon = egui::Rect::from_min_size(
+        egui::pos2(anchor.x as f32, anchor.y as f32) / ppp,
+        egui::vec2(anchor.width as f32, anchor.height as f32) / ppp,
+    );
+    let mut size = outer.size();
+    let too_tall = size.y - (work.height() - 2.0 * SCREEN_GAP);
+    if too_tall > 0.0
+        && let Some(inner) = inner
+    {
+        size.y -= too_tall;
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+            inner.width(),
+            inner.height() - too_tall,
+        )));
+    }
+    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(place_near(
+        icon, work, size,
+    )));
+}
+
+/// Night sky and ember colours, matching the logo and the README.
+mod palette {
+    use eframe::egui::Color32;
+
+    pub const BACKGROUND: Color32 = Color32::from_rgb(22, 25, 31);
+    pub const CARD: Color32 = Color32::from_rgb(30, 34, 42);
+    pub const CARD_RAISED: Color32 = Color32::from_rgb(38, 43, 53);
+    pub const FIELD: Color32 = Color32::from_rgb(16, 18, 23);
+    pub const BORDER: Color32 = Color32::from_rgb(48, 54, 66);
+    pub const CONTROL: Color32 = Color32::from_rgb(47, 52, 64);
+    pub const CONTROL_HOVER: Color32 = Color32::from_rgb(60, 65, 79);
+    pub const TEXT: Color32 = Color32::from_rgb(232, 234, 238);
+    pub const TEXT_WEAK: Color32 = Color32::from_rgb(146, 153, 166);
+    /// The logo's orange, for accents.
+    pub const EMBER: Color32 = Color32::from_rgb(240, 140, 40);
+    /// The logo's hot yellow core, for highlights and warnings.
+    pub const EMBER_HOT: Color32 = Color32::from_rgb(255, 196, 96);
+    /// A deeper orange that light text stays readable on, for selections and slider fills.
+    pub const EMBER_DEEP: Color32 = Color32::from_rgb(196, 84, 28);
+    pub const ERROR: Color32 = Color32::from_rgb(240, 96, 84);
+}
+
+fn apply_theme(ctx: &egui::Context) {
+    use palette::*;
+    let widget =
+        |bg: Color32, stroke: Stroke, fg: Color32, radius: u8| egui::style::WidgetVisuals {
+            bg_fill: bg,
+            weak_bg_fill: bg,
+            bg_stroke: stroke,
+            corner_radius: CornerRadius::same(radius),
+            fg_stroke: Stroke::new(1.0, fg),
+            expansion: 0.0,
+        };
+    let mut v = egui::Visuals::dark();
+    v.panel_fill = BACKGROUND;
+    v.window_fill = CARD;
+    v.window_stroke = Stroke::new(1.0, BORDER);
+    v.window_corner_radius = CornerRadius::same(10);
+    v.menu_corner_radius = CornerRadius::same(8);
+    v.faint_bg_color = CARD_RAISED;
+    v.extreme_bg_color = FIELD;
+    v.text_edit_bg_color = Some(FIELD);
+    v.weak_text_color = Some(TEXT_WEAK);
+    v.hyperlink_color = EMBER_HOT;
+    v.warn_fg_color = EMBER_HOT;
+    v.error_fg_color = ERROR;
+    v.selection.bg_fill = EMBER_DEEP;
+    v.selection.stroke = Stroke::new(1.0, EMBER_HOT);
+    v.slider_trailing_fill = true;
+    v.widgets.noninteractive = widget(CARD, Stroke::new(1.0, BORDER), TEXT, 8);
+    v.widgets.inactive = widget(CONTROL, Stroke::NONE, TEXT, 6);
+    v.widgets.hovered = widget(CONTROL_HOVER, Stroke::new(1.0, EMBER), Color32::WHITE, 6);
+    v.widgets.active = widget(EMBER_DEEP, Stroke::new(1.0, EMBER_HOT), Color32::WHITE, 6);
+    v.widgets.open = widget(CONTROL, Stroke::new(1.0, EMBER), TEXT, 6);
+    ctx.set_visuals_of(egui::Theme::Dark, v);
+    ctx.style_mut_of(egui::Theme::Dark, |s| {
+        s.spacing.item_spacing = egui::vec2(8.0, 7.0);
+        s.spacing.button_padding = egui::vec2(10.0, 4.0);
+        s.spacing.interact_size.y = 24.0;
+    });
+    // Same look whatever the system theme is.
+    ctx.set_theme(egui::Theme::Dark);
+}
+
 impl SettingsApp {
-    fn new(path: PathBuf) -> Self {
+    fn new(path: PathBuf, anchor: Option<Anchor>) -> Self {
         let (cfg, message) = match path.exists().then(|| Config::load(&path)) {
             None => (
                 Config::parse(config::DEFAULT_CONFIG).unwrap_or_default(),
@@ -162,6 +324,9 @@ impl SettingsApp {
             last_preview_write: None,
             running_apps: Vec::new(),
             new_app: String::new(),
+            anchor,
+            first_frame: true,
+            logo: None,
         };
         me.sync_proc_text();
         me.refresh_running_apps();
@@ -324,11 +489,19 @@ fn time_edit(ui: &mut Ui, id: &str, hhmm: &mut String) -> bool {
 }
 
 fn section(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
-    ui.add_space(10.0);
-    ui.label(RichText::new(title).strong().size(16.0));
+    ui.add_space(14.0);
+    ui.label(
+        RichText::new(title)
+            .strong()
+            .size(15.0)
+            .color(palette::EMBER_HOT),
+    );
     ui.add_space(4.0);
-    egui::Frame::group(ui.style())
-        .inner_margin(10.0)
+    egui::Frame::new()
+        .fill(palette::CARD)
+        .stroke(Stroke::new(1.0, palette::BORDER))
+        .corner_radius(10.0)
+        .inner_margin(12.0)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             add(ui)
@@ -338,23 +511,47 @@ fn section(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
 impl eframe::App for SettingsApp {
     fn ui(&mut self, root: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = root.ctx().clone();
+        if std::mem::take(&mut self.first_frame) {
+            // A dark title bar to match, even when Windows is in light mode.
+            ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark));
+            if let Some(a) = self.anchor {
+                move_next_to(&ctx, a);
+            }
+        }
         self.reload_if_changed_on_disk();
         let before = self.cfg.clone();
         let mut preview: Option<ColorSetting> = None;
+        let logo = self
+            .logo
+            .get_or_insert_with(|| {
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [96, 96],
+                    &tray_model::icon_rgba(96, true),
+                );
+                ctx.load_texture("logo", image, egui::TextureOptions::LINEAR)
+            })
+            .clone();
 
-        egui::CentralPanel::default().show(root, |ui| {
+        let panel = egui::Frame::central_panel(&ctx.global_style())
+            .inner_margin(egui::Margin::symmetric(18, 14));
+        egui::CentralPanel::default().frame(panel).show(root, |ui| {
             ui.spacing_mut().slider_width = (ui.available_width() - 260.0).clamp(120.0, 300.0);
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                // ── Now ────────────────────────────────────────────────
+                // ── Header ─────────────────────────────────────────────
                 let now = schedule::scheduled_setting(&self.cfg, chrono::Local::now());
                 ui.horizontal(|ui| {
-                    swatch(ui, now);
-                    let paused = if engine::paused().is_some() { " — paused" } else { "" };
-                    ui.label(
-                        RichText::new(format!("Right now: {} K, {:.0} %{paused}", now.temperature, now.brightness * 100.0))
-                            .size(15.0),
-                    );
+                    ui.add(egui::Image::new(&logo).fit_to_exact_size(egui::vec2(44.0, 44.0)));
+                    ui.add_space(4.0);
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new("Ember").strong().size(22.0).color(palette::TEXT));
+                        ui.horizontal(|ui| {
+                            swatch(ui, now);
+                            let paused = if engine::paused().is_some() { " · paused" } else { "" };
+                            ui.label(format!("Right now {} K, {:.0} %{paused}", now.temperature, now.brightness * 100.0));
+                        });
+                    });
                 });
+                ui.add_space(2.0);
                 if self.backend.is_some() {
                     ui.weak("Drag a slider to preview it on screen.");
                 } else {
@@ -463,7 +660,7 @@ impl eframe::App for SettingsApp {
                             ui.weak("Pick a city or enter coordinates (north and east are positive). Ember never uses the network.");
                             let (lat, lon) = (s.latitude.unwrap_or(0.0), s.longitude.unwrap_or(0.0));
                             if lat == 0.0 && lon == 0.0 {
-                                ui.colored_label(Color32::from_rgb(220, 140, 40), "Set your location to get correct sunset times.");
+                                ui.colored_label(palette::EMBER_HOT, "Set your location to get correct sunset times.");
                             }
                             let t = schedule::solar_times(lat, lon, chrono::Local::now().date_naive());
                             let fmt = |p: Option<(chrono::NaiveTime, chrono::NaiveTime)>| {
@@ -555,7 +752,7 @@ impl eframe::App for SettingsApp {
 
                 ui.add_space(8.0);
                 if let Some((msg, err)) = &self.message {
-                    let color = if *err { Color32::from_rgb(220, 70, 60) } else { ui.visuals().weak_text_color() };
+                    let color = if *err { palette::ERROR } else { ui.visuals().weak_text_color() };
                     ui.colored_label(color, msg);
                 }
             });
@@ -703,9 +900,52 @@ fn rule_editor(
             }
         });
     if rule.processes.is_empty() {
-        ui.colored_label(
-            Color32::from_rgb(220, 140, 40),
-            "Add at least one process name.",
+        ui.colored_label(palette::EMBER_HOT, "Add at least one process name.");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Rect, pos2, vec2};
+
+    // A 1920x1080 screen with a 48px taskbar, and a 520x680 window.
+    const SIZE: egui::Vec2 = vec2(520.0, 680.0);
+
+    #[test]
+    fn opens_above_a_bottom_taskbar_centred_on_the_icon() {
+        let work = Rect::from_min_max(pos2(0.0, 0.0), pos2(1920.0, 1032.0));
+        let icon = Rect::from_min_size(pos2(1500.0, 1040.0), vec2(24.0, 32.0));
+        let p = place_near(icon, work, SIZE);
+        assert_eq!(p, pos2(1512.0 - 260.0, 1032.0 - 680.0 - SCREEN_GAP));
+    }
+
+    #[test]
+    fn stays_on_screen_when_the_icon_is_near_the_corner() {
+        let work = Rect::from_min_max(pos2(0.0, 0.0), pos2(1920.0, 1032.0));
+        let icon = Rect::from_min_size(pos2(1880.0, 1040.0), vec2(24.0, 32.0));
+        let p = place_near(icon, work, SIZE);
+        assert_eq!(p.x, 1920.0 - 520.0 - SCREEN_GAP);
+    }
+
+    #[test]
+    fn opens_beside_a_right_hand_taskbar() {
+        let work = Rect::from_min_max(pos2(0.0, 0.0), pos2(1872.0, 1080.0));
+        let icon = Rect::from_min_size(pos2(1884.0, 900.0), vec2(24.0, 24.0));
+        let p = place_near(icon, work, SIZE);
+        assert_eq!(p.x, 1872.0 - 520.0 - SCREEN_GAP);
+        assert_eq!(
+            p.y,
+            1080.0 - 680.0 - SCREEN_GAP,
+            "clamped above the bottom edge"
         );
+    }
+
+    #[test]
+    fn opens_above_an_icon_in_the_overflow_flyout() {
+        let work = Rect::from_min_max(pos2(0.0, 0.0), pos2(1920.0, 1032.0));
+        let icon = Rect::from_min_size(pos2(1400.0, 960.0), vec2(32.0, 32.0));
+        let p = place_near(icon, work, SIZE);
+        assert_eq!(p, pos2(1416.0 - 260.0, 960.0 - 680.0 - SCREEN_GAP));
     }
 }
