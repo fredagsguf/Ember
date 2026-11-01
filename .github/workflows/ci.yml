@@ -1,8 +1,8 @@
 name: CI
 
+# Run by hand (Actions → CI → Run workflow) on any branch; releases build and test on their own.
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   windows:
@@ -44,7 +44,7 @@ jobs:
         run: .github/scripts/windows-ui-check.ps1 -Exe target/release/ember.exe -Out ui-check
 
       - name: Publish screenshots to the ci-screenshots branch
-        if: always() && github.event_name == 'push'
+        if: always()
         shell: bash
         run: |
           [ -d ui-check ] || exit 0
