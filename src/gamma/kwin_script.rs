@@ -7,6 +7,7 @@
 //! The script is loaded under a fixed plugin name and unloaded on exit and before loading, so a
 //! copy left behind by a crash never stacks up with a new one.
 
+use super::FocusedWindow;
 use anyhow::{Context, Result, bail};
 use std::sync::{Arc, Mutex};
 use zbus::blocking::Connection;
@@ -56,15 +57,35 @@ fn js_string(s: &str) -> String {
 /// The KWin script, calling `ActiveWindowChanged` on `service`. One script serves both Plasma
 /// versions: Plasma 6 calls windows "windows" (`windowActivated`, `activeWindow`), Plasma 5 calls
 /// them "clients". Plain ES5, since Plasma 5 runs scripts in QtScript. Everything is sent as a
-/// string because KWin doesn't say whether a JS number goes out as an int or a double.
+/// string because KWin doesn't say whether a JS number goes out as an int or a double. The
+/// focused window is reported again when its title changes or it enters or leaves fullscreen.
 fn script_text(service: &str) -> String {
     format!(
         r#"// Loaded by Ember (https://github.com/fredagsguf/Ember) to see which window is focused.
-function report(w) {{
+var current = null;
+function send() {{
+    var w = current;
     callDBus({service}, {path}, {interface}, "ActiveWindowChanged",
         w ? String(w.pid) : "0",
         w ? String(w.resourceClass) : "",
-        w ? String(w.caption) : "");
+        w ? String(w.caption) : "",
+        w && w.fullScreen ? "1" : "0");
+}}
+function report(w) {{
+    if (current) {{
+        try {{
+            current.captionChanged.disconnect(send);
+            current.fullScreenChanged.disconnect(send);
+        }} catch (e) {{}}
+    }}
+    current = w;
+    if (w) {{
+        try {{
+            w.captionChanged.connect(send);
+            w.fullScreenChanged.connect(send);
+        }} catch (e) {{}}
+    }}
+    send();
 }}
 if (workspace.windowActivated) {{
     workspace.windowActivated.connect(report);
@@ -90,8 +111,15 @@ fn parse_pid(pid: &str) -> Option<u32> {
         .filter(|&p| p != 0)
 }
 
-/// Last report from the script: `None` until the first one arrives, then the focused PID.
-type Reported = Arc<Mutex<Option<Option<u32>>>>;
+/// One report from the script.
+#[derive(Debug, Clone, Default)]
+struct Report {
+    pid: Option<u32>,
+    window: FocusedWindow,
+}
+
+/// Last report from the script: `None` until the first one arrives.
+type Reported = Arc<Mutex<Option<Report>>>;
 
 struct Receiver {
     reported: Reported,
@@ -106,7 +134,8 @@ impl Receiver {
         #[zbus(header)] header: Header<'_>,
         pid: String,
         resource_class: String,
-        _caption: String,
+        caption: String,
+        fullscreen: String,
     ) {
         if header.sender().map(|s| s.as_str()) != Some(self.kwin.as_str()) {
             log::debug!("kwin: ignoring a focus report that didn't come from KWin");
@@ -114,8 +143,12 @@ impl Receiver {
         }
         let pid = parse_pid(&pid);
         log::debug!("kwin: active window {resource_class:?} (pid {pid:?})");
+        let window = FocusedWindow {
+            title: (pid.is_some() && !caption.is_empty()).then_some(caption),
+            fullscreen: pid.is_some() && fullscreen == "1",
+        };
         if let Ok(mut r) = self.reported.lock() {
-            *r = Some(pid);
+            *r = Some(Report { pid, window });
         }
     }
 }
@@ -193,7 +226,12 @@ impl Script {
 
     /// `None` until the script has reported, then the focused window's PID (`None` = no window).
     pub fn focused_pid(&self) -> Option<Option<u32>> {
-        *self.reported.lock().ok()?
+        Some(self.reported.lock().ok()?.as_ref()?.pid)
+    }
+
+    /// `None` until the script has reported, then the focused window's title and state.
+    pub fn focused_window(&self) -> Option<FocusedWindow> {
+        Some(self.reported.lock().ok()?.as_ref()?.window.clone())
     }
 
     fn scripting<B, R>(&self, method: &str, body: &B) -> Result<R>
@@ -266,6 +304,8 @@ mod tests {
         assert!(s.contains("report(workspace.activeWindow)"));
         assert!(s.contains("workspace.clientActivated.connect(report)"));
         assert!(s.contains("report(workspace.activeClient)"));
+        assert!(s.contains("w.captionChanged.connect(send)"));
+        assert!(s.contains("w.fullScreenChanged.connect(send)"));
         // QtScript (Plasma 5) predates ES6.
         assert!(!s.contains("const ") && !s.contains("let ") && !s.contains("=>"));
     }

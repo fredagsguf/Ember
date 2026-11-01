@@ -9,7 +9,7 @@
 //! wlroots compositors don't tell clients the current ramp, so a calibration curve loaded while
 //! Ember runs can't be detected here (the compositor restores its own ramp when Ember lets go).
 
-use super::Backend;
+use super::{Backend, FocusedWindow};
 use crate::color::{ColorSetting, Ramp};
 use crate::config::{self, Display};
 use anyhow::{Context, Result, bail};
@@ -76,9 +76,13 @@ impl Output {
 #[derive(Default)]
 struct Toplevel {
     app_id: Option<String>,
+    title: Option<String>,
     activated: bool,
+    fullscreen: bool,
     pending_app_id: Option<String>,
-    pending_activated: Option<bool>,
+    pending_title: Option<String>,
+    /// (activated, fullscreen)
+    pending_state: Option<(bool, bool)>,
 }
 
 struct State {
@@ -159,10 +163,12 @@ impl State {
         wanted.peek().is_some() && wanted.all(|o| o.control.is_none())
     }
 
+    fn focused(&self) -> Option<&Toplevel> {
+        self.toplevels.values().find(|t| t.activated)
+    }
+
     fn focused_app_id(&self) -> Option<String> {
-        self.toplevels
-            .values()
-            .find(|t| t.activated)
+        self.focused()
             .and_then(|t| t.app_id.as_deref())
             .and_then(app_id_name)
     }
@@ -190,13 +196,16 @@ fn ramp_file(r: &Ramp) -> Result<File> {
 }
 
 /// `state` is an array of native-endian u32 enum values.
-fn is_activated(state: &[u8]) -> bool {
-    let activated = zwlr_foreign_toplevel_handle_v1::State::Activated as u32;
+fn has_state(state: &[u8], which: zwlr_foreign_toplevel_handle_v1::State) -> bool {
     state
         .as_chunks::<4>()
         .0
         .iter()
-        .any(|&c| u32::from_ne_bytes(c) == activated)
+        .any(|&c| u32::from_ne_bytes(c) == which as u32)
+}
+
+fn is_activated(state: &[u8]) -> bool {
+    has_state(state, zwlr_foreign_toplevel_handle_v1::State::Activated)
 }
 
 /// The name rules match against. Some apps report their desktop file name, `foo.desktop`.
@@ -392,6 +401,19 @@ impl Backend for Wlr {
         }
         self.state.focused_app_id()
     }
+
+    fn focused_window(&mut self) -> FocusedWindow {
+        if let Err(e) = self.bind_toplevel_manager().and_then(|()| self.pump()) {
+            log::debug!("wayland: reading window list failed: {e:#}");
+        }
+        self.state
+            .focused()
+            .map(|t| FocusedWindow {
+                title: t.title.clone(),
+                fullscreen: t.fullscreen,
+            })
+            .unwrap_or_default()
+    }
 }
 
 impl Dispatch<WlRegistry, GlobalListContents> for State {
@@ -519,13 +541,21 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for State {
         let t = state.toplevels.entry(handle.id()).or_default();
         match event {
             Event::AppId { app_id } => t.pending_app_id = Some(app_id),
-            Event::State { state: flags } => t.pending_activated = Some(is_activated(&flags)),
+            Event::Title { title } => t.pending_title = Some(title),
+            Event::State { state: flags } => {
+                let fullscreen = zwlr_foreign_toplevel_handle_v1::State::Fullscreen;
+                t.pending_state = Some((is_activated(&flags), has_state(&flags, fullscreen)));
+            }
             Event::Done => {
                 if let Some(id) = t.pending_app_id.take() {
                     t.app_id = Some(id);
                 }
-                if let Some(a) = t.pending_activated.take() {
+                if let Some(title) = t.pending_title.take() {
+                    t.title = Some(title);
+                }
+                if let Some((a, f)) = t.pending_state.take() {
                     t.activated = a;
+                    t.fullscreen = f;
                 }
             }
             _ => {}

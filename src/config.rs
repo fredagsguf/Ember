@@ -32,6 +32,9 @@ pub struct General {
     pub preserve_calibration: bool,
     /// Global hotkey that pauses/resumes Ember, e.g. "Ctrl+Alt+End". Empty = no hotkey.
     pub toggle_hotkey: String,
+    /// Minutes to ease in when the scheduled colour jumps instead of drifting: Ember starting
+    /// in the evening, waking from sleep, an edited schedule. 0 = instant.
+    pub jump_fade_minutes: f64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -41,6 +44,9 @@ pub struct Color {
     pub night_temperature: u32,
     pub day_brightness: f32,
     pub night_brightness: f32,
+    /// The deeper colour from `schedule.bedtime` on.
+    pub bedtime_temperature: u32,
+    pub bedtime_brightness: f32,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -65,6 +71,70 @@ pub struct Schedule {
     pub night_end: String,
     /// Fixed mode: how long the fade into/out of night takes.
     pub transition_minutes: u32,
+    /// Fixed mode: other night times on some days of the week.
+    pub days: Days,
+    /// Solar mode: start the evening fade this many minutes later than the sun says (negative
+    /// = earlier).
+    pub sunset_offset_minutes: i32,
+    /// Solar mode: start the morning fade this many minutes later than the sun says.
+    pub sunrise_offset_minutes: i32,
+    /// "HH:MM": from here until noon, night deepens to the bedtime colour. Empty = off.
+    pub bedtime: String,
+}
+
+/// Night times for one evening: `night_start` on that day, `night_end` the morning after.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DayTimes {
+    pub night_start: String,
+    pub night_end: String,
+}
+
+/// `[schedule.days]`: evenings that differ from `night_start`/`night_end`, by the day the night
+/// starts on (`fri` is Friday evening to Saturday morning).
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Days {
+    pub mon: Option<DayTimes>,
+    pub tue: Option<DayTimes>,
+    pub wed: Option<DayTimes>,
+    pub thu: Option<DayTimes>,
+    pub fri: Option<DayTimes>,
+    pub sat: Option<DayTimes>,
+    pub sun: Option<DayTimes>,
+}
+
+impl Days {
+    pub const NAMES: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+
+    /// The entry for `chrono::Weekday::num_days_from_monday() == i`.
+    pub fn get(&self, i: usize) -> &Option<DayTimes> {
+        [
+            &self.mon, &self.tue, &self.wed, &self.thu, &self.fri, &self.sat, &self.sun,
+        ][i]
+    }
+
+    pub fn get_mut(&mut self, i: usize) -> &mut Option<DayTimes> {
+        match i {
+            0 => &mut self.mon,
+            1 => &mut self.tue,
+            2 => &mut self.wed,
+            3 => &mut self.thu,
+            4 => &mut self.fri,
+            5 => &mut self.sat,
+            _ => &mut self.sun,
+        }
+    }
+}
+
+impl Schedule {
+    /// `(night_start, night_end)` for the night that starts on `day`.
+    pub fn times_for(&self, day: chrono::Weekday) -> (&str, &str) {
+        match self.days.get(day.num_days_from_monday() as usize) {
+            Some(d) => (&d.night_start, &d.night_end),
+            None => (&self.night_start, &self.night_end),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
@@ -77,14 +147,26 @@ pub enum When {
     Focused,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+/// A rule matches when every kind of condition it sets holds (any one of a list will do):
+/// `processes = ["firefox"]` with `titles = ["YouTube"]` is YouTube in Firefox.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Rule {
     #[serde(default)]
     pub name: Option<String>,
     /// Process names, case-insensitive; a trailing ".exe" is optional
     /// ("cs2" matches both `cs2.exe` on Windows and `cs2` on Linux).
+    #[serde(default)]
     pub processes: Vec<String>,
+    /// Text in the focused window's title, case-insensitive. Focused rules only.
+    #[serde(default)]
+    pub titles: Vec<String>,
+    /// The focused window covers its whole screen. Focused rules only.
+    #[serde(default)]
+    pub fullscreen: bool,
+    /// The app is a game started by Steam.
+    #[serde(default)]
+    pub steam_games: bool,
     #[serde(default)]
     pub when: When,
     /// If neither `temperature` nor `brightness` is set the rule disables Ember
@@ -148,11 +230,101 @@ pub fn set_display_tint(displays: &mut Vec<Display>, id: &str, tint: bool) {
 
 impl Rule {
     pub fn label(&self) -> String {
-        self.name
-            .clone()
-            .unwrap_or_else(|| self.processes.join(", "))
+        if let Some(n) = &self.name {
+            return n.clone();
+        }
+        let mut parts = Vec::new();
+        if !self.processes.is_empty() {
+            parts.push(self.processes.join(", "));
+        }
+        if !self.titles.is_empty() {
+            parts.push(format!("\"{}\"", self.titles.join("\", \"")));
+        }
+        if self.fullscreen {
+            parts.push("fullscreen apps".into());
+        }
+        if self.steam_games {
+            parts.push("Steam games".into());
+        }
+        parts.join(" ")
+    }
+
+    pub fn titles(&self) -> impl Iterator<Item = &str> {
+        self.titles
+            .iter()
+            .map(|t| t.trim())
+            .filter(|t| !t.is_empty())
+    }
+
+    /// Whether the rule says what it matches at all.
+    pub fn has_conditions(&self) -> bool {
+        self.processes.iter().any(|p| !p.trim().is_empty())
+            || self.titles().next().is_some()
+            || self.fullscreen
+            || self.steam_games
+    }
+
+    /// Matches on process names only: the kind the tray's "Disable while …" adds and removes.
+    fn is_plain(&self) -> bool {
+        self.titles().next().is_none() && !self.fullscreen && !self.steam_games
+    }
+
+    pub fn disables(&self) -> bool {
+        self.temperature.is_none() && self.brightness.is_none()
+    }
+
+    /// Ready-made rules the settings window offers as one tick each.
+    pub fn presets() -> [(&'static str, Rule); 3] {
+        [
+            (
+                "Turn off for any fullscreen app",
+                Rule {
+                    name: Some("Fullscreen apps".into()),
+                    fullscreen: true,
+                    ..Rule::default()
+                },
+            ),
+            (
+                "Turn off for every Steam game",
+                Rule {
+                    name: Some("Steam games".into()),
+                    steam_games: true,
+                    ..Rule::default()
+                },
+            ),
+            (
+                "Milder tint in video players",
+                Rule {
+                    name: Some("Video players".into()),
+                    processes: VIDEO_PLAYERS.iter().map(|p| p.to_string()).collect(),
+                    temperature: Some(4800),
+                    ..Rule::default()
+                },
+            ),
+        ]
     }
 }
+
+/// Process names (and Wayland app_ids) of common video players, for the video player preset.
+const VIDEO_PLAYERS: &[&str] = &[
+    "vlc",
+    "mpv",
+    "mpc-hc64",
+    "mpc-hc",
+    "mpc-be64",
+    "mpc-be",
+    "potplayermini64",
+    "potplayermini",
+    "wmplayer",
+    "video.ui",
+    "celluloid",
+    "io.github.celluloid_player.celluloid",
+    "totem",
+    "org.gnome.totem",
+    "haruna",
+    "org.kde.haruna",
+    "smplayer",
+];
 
 impl Default for General {
     fn default() -> Self {
@@ -161,6 +333,7 @@ impl Default for General {
             fade_secs: 0.5,
             preserve_calibration: true,
             toggle_hotkey: "Ctrl+Alt+End".into(),
+            jump_fade_minutes: 7.0,
         }
     }
 }
@@ -172,6 +345,8 @@ impl Default for Color {
             night_temperature: 3400,
             day_brightness: 1.0,
             night_brightness: 1.0,
+            bedtime_temperature: 2700,
+            bedtime_brightness: 1.0,
         }
     }
 }
@@ -185,9 +360,17 @@ impl Default for Schedule {
             night_start: "21:00".into(),
             night_end: "07:00".into(),
             transition_minutes: 45,
+            days: Days::default(),
+            sunset_offset_minutes: 0,
+            sunrise_offset_minutes: 0,
+            bedtime: String::new(),
         }
     }
 }
+
+/// Limits for `schedule.sunset_offset_minutes`/`sunrise_offset_minutes`.
+pub const MAX_SOLAR_OFFSET: i32 = 180;
+pub const MAX_JUMP_FADE_MINUTES: f64 = 30.0;
 
 pub fn parse_hhmm(s: &str) -> Result<NaiveTime> {
     NaiveTime::parse_from_str(s.trim(), "%H:%M")
@@ -226,9 +409,32 @@ impl Config {
             }
             ScheduleMode::AlwaysNight => {}
         }
+        for (i, name) in Days::NAMES.iter().enumerate() {
+            if let Some(d) = s.days.get(i) {
+                parse_hhmm(&d.night_start).with_context(|| format!("schedule.days.{name}"))?;
+                parse_hhmm(&d.night_end).with_context(|| format!("schedule.days.{name}"))?;
+            }
+        }
+        for (key, m) in [
+            ("sunset_offset_minutes", s.sunset_offset_minutes),
+            ("sunrise_offset_minutes", s.sunrise_offset_minutes),
+        ] {
+            if !(-MAX_SOLAR_OFFSET..=MAX_SOLAR_OFFSET).contains(&m) {
+                bail!("schedule.{key} must be between -{MAX_SOLAR_OFFSET} and {MAX_SOLAR_OFFSET}");
+            }
+        }
+        if !s.bedtime.trim().is_empty() {
+            parse_hhmm(&s.bedtime).context("schedule.bedtime")?;
+        }
+        if !(0.0..=MAX_JUMP_FADE_MINUTES).contains(&self.general.jump_fade_minutes) {
+            bail!("general.jump_fade_minutes must be between 0 and {MAX_JUMP_FADE_MINUTES}");
+        }
         for (i, r) in self.rules.iter().enumerate() {
-            if r.processes.iter().all(|p| p.trim().is_empty()) {
-                bail!("rules[{i}] has no process names");
+            if !r.has_conditions() {
+                bail!("rules[{i}] needs processes, titles, fullscreen or steam_games");
+            }
+            if r.when == When::Running && (r.titles().next().is_some() || r.fullscreen) {
+                bail!("rules[{i}]: titles and fullscreen only work with when = \"focused\"");
             }
         }
         for (i, d) in self.displays.iter().enumerate() {
@@ -247,8 +453,8 @@ impl Config {
     /// Is there a rule that fully disables Ember while `app` (normalised name) is focused or running?
     pub fn has_disable_rule(&self, app: &str) -> bool {
         self.rules.iter().any(|r| {
-            r.temperature.is_none()
-                && r.brightness.is_none()
+            r.disables()
+                && r.is_plain()
                 && r.processes
                     .iter()
                     .any(|p| crate::rules::normalize(p) == app)
@@ -277,9 +483,19 @@ pub fn edit_text_set_app_rule(text: &str, app: &str, enable: bool) -> Result<Str
         t.insert("when", value("focused"));
         rules.push(t);
     } else {
-        // Strip `app` from every disable-rule; drop rules left with no processes.
-        let is_disable =
-            |t: &Table| !t.contains_key("temperature") && !t.contains_key("brightness");
+        // Strip `app` from every plain disable-rule; drop rules left with no processes. Rules that
+        // also look at titles, fullscreen or Steam are the user's own and stay as they are.
+        let is_disable = |t: &Table| {
+            [
+                "temperature",
+                "brightness",
+                "titles",
+                "fullscreen",
+                "steam_games",
+            ]
+            .iter()
+            .all(|k| !t.contains_key(k))
+        };
         let mut empty = Vec::new();
         for (i, t) in rules.iter_mut().enumerate() {
             if !is_disable(t) {
@@ -404,6 +620,13 @@ pub fn edit_text_apply(text: &str, new: &Config) -> Result<String> {
             n.toggle_hotkey.as_str(),
             |x: &str| x.to_string()
         );
+        sync!(
+            t,
+            "jump_fade_minutes",
+            o.jump_fade_minutes,
+            n.jump_fade_minutes,
+            |x: f64| round_to(x, 1)
+        );
     }
     let (o, n) = (&old.color, &new.color);
     if o != n {
@@ -428,6 +651,20 @@ pub fn edit_text_apply(text: &str, new: &Config) -> Result<String> {
             "night_brightness",
             o.night_brightness,
             n.night_brightness,
+            f2
+        );
+        sync!(
+            t,
+            "bedtime_temperature",
+            o.bedtime_temperature,
+            n.bedtime_temperature,
+            int
+        );
+        sync!(
+            t,
+            "bedtime_brightness",
+            o.bedtime_brightness,
+            n.bedtime_brightness,
             f2
         );
     }
@@ -462,6 +699,56 @@ pub fn edit_text_apply(text: &str, new: &Config) -> Result<String> {
             n.transition_minutes,
             int
         );
+        sync!(
+            t,
+            "sunset_offset_minutes",
+            o.sunset_offset_minutes,
+            n.sunset_offset_minutes,
+            |x: i32| x as i64
+        );
+        sync!(
+            t,
+            "sunrise_offset_minutes",
+            o.sunrise_offset_minutes,
+            n.sunrise_offset_minutes,
+            |x: i32| x as i64
+        );
+        sync!(
+            t,
+            "bedtime",
+            o.bedtime.as_str(),
+            n.bedtime.as_str(),
+            |x: &str| x.to_string()
+        );
+        if o.days != n.days {
+            if !t.contains_key("days") {
+                let mut days = Table::new();
+                days.set_implicit(false);
+                t.insert("days", Item::Table(days));
+            }
+            let days = t["days"]
+                .as_table_like_mut()
+                .context("schedule.days must be a table")?;
+            for (i, name) in Days::NAMES.iter().enumerate() {
+                if o.days.get(i) == n.days.get(i) {
+                    continue;
+                }
+                match n.days.get(i) {
+                    Some(d) => {
+                        let mut v = toml_edit::InlineTable::new();
+                        v.insert("night_start", d.night_start.as_str().into());
+                        v.insert("night_end", d.night_end.as_str().into());
+                        days.insert(name, Item::Value(Value::InlineTable(v)));
+                    }
+                    None => {
+                        days.remove(name);
+                    }
+                }
+            }
+            if days.is_empty() {
+                t.remove("days");
+            }
+        }
     }
 
     if old.rules != new.rules {
@@ -487,11 +774,22 @@ pub fn edit_text_apply(text: &str, new: &Config) -> Result<String> {
                 set_opt(t, "name", r.name.clone().map(Value::from));
             }
             if prev.map(|p| &p.processes) != Some(&r.processes) {
-                set(
+                let procs = r.processes.iter().map(String::as_str).collect::<Array>();
+                set_opt(
                     t,
                     "processes",
-                    r.processes.iter().map(String::as_str).collect::<Array>(),
+                    (!r.processes.is_empty()).then(|| procs.into()),
                 );
+            }
+            if prev.map(|p| &p.titles) != Some(&r.titles) {
+                let titles = r.titles.iter().map(String::as_str).collect::<Array>();
+                set_opt(t, "titles", (!r.titles.is_empty()).then(|| titles.into()));
+            }
+            if prev.map(|p| p.fullscreen) != Some(r.fullscreen) {
+                set_opt(t, "fullscreen", r.fullscreen.then(|| true.into()));
+            }
+            if prev.map(|p| p.steam_games) != Some(r.steam_games) {
+                set_opt(t, "steam_games", r.steam_games.then(|| true.into()));
             }
             if prev.map(|p| p.when) != Some(r.when) {
                 set(t, "when", when(r.when));
@@ -595,6 +893,51 @@ mod tests {
     }
 
     #[test]
+    fn new_rule_kinds_validate() {
+        assert!(Config::parse("[[rules]]\nfullscreen = true").is_ok());
+        assert!(Config::parse("[[rules]]\nsteam_games = true\nwhen = \"running\"").is_ok());
+        assert!(Config::parse("[[rules]]\ntitles = [\"YouTube\"]").is_ok());
+        assert!(Config::parse("[[rules]]\nname = \"nothing\"").is_err());
+        assert!(Config::parse("[[rules]]\ntitles = [\" \"]").is_err());
+        assert!(Config::parse("[[rules]]\nfullscreen = true\nwhen = \"running\"").is_err());
+    }
+
+    #[test]
+    fn schedule_extras_validate() {
+        assert!(Config::parse("[schedule]\nbedtime = \"23:00\"").is_ok());
+        assert!(Config::parse("[schedule]\nbedtime = \"late\"").is_err());
+        assert!(Config::parse("[schedule]\nsunset_offset_minutes = 400").is_err());
+        assert!(
+            Config::parse(
+                "[schedule.days]\nsat = { night_start = \"00:30\", night_end = \"10:00\" }"
+            )
+            .is_ok()
+        );
+        assert!(Config::parse("[schedule.days]\nsat = { night_start = \"00:30\" }").is_err());
+        assert!(Config::parse("[general]\njump_fade_minutes = -1").is_err());
+    }
+
+    #[test]
+    fn tray_app_rule_leaves_title_rules_alone() {
+        let text = "[[rules]]\nprocesses = [\"firefox\"]\ntitles = [\"YouTube\"]\n";
+        let cfg = Config::parse(text).unwrap();
+        assert!(!cfg.has_disable_rule("firefox"));
+        let out = edit_text_set_app_rule(text, "firefox", false).unwrap();
+        assert_eq!(Config::parse(&out).unwrap(), cfg);
+    }
+
+    #[test]
+    fn presets_are_valid_rules() {
+        let cfg = Config {
+            rules: Rule::presets().into_iter().map(|(_, r)| r).collect(),
+            ..Config::default()
+        };
+        cfg.validate().unwrap();
+        let out = edit_text_apply("", &cfg).unwrap();
+        assert_eq!(Config::parse(&out).unwrap(), cfg);
+    }
+
+    #[test]
     fn empty_config_uses_defaults() {
         assert_eq!(Config::parse("").unwrap(), Config::default());
     }
@@ -661,11 +1004,41 @@ temperature = 5000
             name: Some("Valorant".into()),
             processes: vec!["valorant".into(), "valorant-win64-shipping".into()],
             when: When::Running,
-            temperature: None,
             brightness: Some(0.9),
+            ..Rule::default()
+        });
+        cfg.rules.push(Rule {
+            processes: vec!["firefox".into()],
+            titles: vec!["YouTube".into()],
+            ..Rule::default()
+        });
+        cfg.rules.push(Rule {
+            fullscreen: true,
+            ..Rule::default()
+        });
+        cfg.rules.push(Rule {
+            steam_games: true,
+            when: When::Running,
+            ..Rule::default()
+        });
+        cfg.general.jump_fade_minutes = 10.0;
+        cfg.color.bedtime_temperature = 2200;
+        cfg.schedule.bedtime = "23:30".into();
+        cfg.schedule.sunset_offset_minutes = 30;
+        cfg.schedule.sunrise_offset_minutes = -15;
+        cfg.schedule.days.fri = Some(DayTimes {
+            night_start: "23:30".into(),
+            night_end: "09:00".into(),
         });
         let out = edit_text_apply(DEFAULT_CONFIG, &cfg).unwrap();
         assert_eq!(Config::parse(&out).unwrap(), cfg);
+        assert!(out.contains("fri = { night_start = \"23:30\", night_end = \"09:00\" }"));
+        // Taking a day out again drops the then empty table.
+        let mut fewer = cfg.clone();
+        fewer.schedule.days.fri = None;
+        let out = edit_text_apply(&out, &fewer).unwrap();
+        assert_eq!(Config::parse(&out).unwrap(), fewer);
+        assert!(!out.lines().any(|l| l.trim() == "[schedule.days]"));
         // untouched comments survive, including the inline one on a changed value
         assert!(out.contains("# Ember configuration."));
         assert!(out.contains("night_temperature = 2700 # lower = warmer/redder"));

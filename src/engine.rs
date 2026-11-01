@@ -1,14 +1,14 @@
 //! The decision loop: schedule + rules + pause -> what to put on screen.
 
 use crate::color::ColorSetting;
-use crate::config::{Config, When};
+use crate::config::{Config, Rule, When};
 use crate::gamma::Backend;
 use crate::rules::{self, Snapshot};
 use crate::schedule;
 use chrono::Local;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
-use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System, UpdateKind};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reason {
@@ -48,14 +48,17 @@ impl ProcessWatcher {
         Ok(ProcessWatcher { sys })
     }
 
-    /// Running processes (only scanned if a rule needs them) and the focused process.
+    /// Running processes (only scanned if a rule needs them), the focused process and window.
     pub fn snapshot(&mut self, cfg: &Config, backend: &mut dyn Backend) -> Snapshot {
         let mut snap = Snapshot::default();
-        if cfg.rules.iter().any(|r| r.when == When::Running) {
+        let running = |r: &&Rule| r.when == When::Running;
+        let focused = |r: &&Rule| r.when == When::Focused;
+        if cfg.rules.iter().any(|r| running(&r)) {
+            let steam = cfg.rules.iter().filter(running).any(|r| r.steam_games);
             self.sys.refresh_processes_specifics(
                 ProcessesToUpdate::All,
                 true,
-                ProcessRefreshKind::nothing(),
+                steam_details(steam),
             );
             snap.running = self
                 .sys
@@ -63,26 +66,57 @@ impl ProcessWatcher {
                 .values()
                 .map(|p| rules::normalize(&p.name().to_string_lossy()))
                 .collect();
+            snap.steam_running = steam
+                && self.sys.processes().values().any(|p| {
+                    let name = rules::normalize(&p.name().to_string_lossy());
+                    rules::is_steam_game(&name, p.exe(), p.environ())
+                });
         }
-        snap.focused = self.focused_name(backend);
+        let steam = cfg.rules.iter().filter(focused).any(|r| r.steam_games);
+        (snap.focused, snap.steam_focused) = self.focused_process(backend, steam);
+        if cfg
+            .rules
+            .iter()
+            .filter(focused)
+            .any(|r| r.fullscreen || r.titles().next().is_some())
+        {
+            let w = backend.focused_window();
+            snap.title = w.title;
+            snap.fullscreen = w.fullscreen;
+        }
         snap
     }
 
     /// Name of the process owning the foreground window. Only refreshes that one process.
     /// On Wayland compositors that only report the window's app_id, that is the name instead.
     pub fn focused_name(&mut self, backend: &mut dyn Backend) -> Option<String> {
+        self.focused_process(backend, false).0
+    }
+
+    /// The focused process's name, and (if `steam` is asked for) whether it's a Steam game.
+    fn focused_process(
+        &mut self,
+        backend: &mut dyn Backend,
+        steam: bool,
+    ) -> (Option<String>, bool) {
         let Some(pid) = backend.focused_pid() else {
-            return backend.focused_app_id().map(|id| rules::normalize(&id));
+            let id = backend.focused_app_id().map(|id| rules::normalize(&id));
+            // wlroots compositors see Proton games as `steam_app_<id>`.
+            let is_steam = steam && id.as_deref().is_some_and(|id| id.starts_with("steam_app_"));
+            return (id, is_steam);
         };
         let pid = Pid::from_u32(pid);
         self.sys.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[pid]),
             true,
-            ProcessRefreshKind::nothing(),
+            steam_details(steam),
         );
-        self.sys
-            .process(pid)
-            .map(|p| rules::normalize(&p.name().to_string_lossy()))
+        let Some(p) = self.sys.process(pid) else {
+            return (None, false);
+        };
+        let name = rules::normalize(&p.name().to_string_lossy());
+        let is_steam = steam && rules::is_steam_game(&name, p.exe(), p.environ());
+        (Some(name), is_steam)
     }
 
     /// All running processes, for the settings window's app picker.
@@ -101,6 +135,18 @@ impl ProcessWatcher {
         v.sort();
         v.dedup();
         v
+    }
+}
+
+/// What to read about processes: their executable and environment only when looking for Steam
+/// games, since reading another process's environment is comparatively slow.
+fn steam_details(steam: bool) -> ProcessRefreshKind {
+    if steam {
+        ProcessRefreshKind::nothing()
+            .with_exe(UpdateKind::OnlyIfNotSet)
+            .with_environ(UpdateKind::OnlyIfNotSet)
+    } else {
+        ProcessRefreshKind::nothing()
     }
 }
 

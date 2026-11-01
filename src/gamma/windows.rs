@@ -7,19 +7,21 @@
 //! unless HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ICM\GdiIcmGammaRange (DWORD) = 256.
 //! `ember` reports a hint when that happens; see README.
 
-use super::Backend;
 use super::calibration::Calibration;
+use super::{Backend, FocusedWindow};
 use crate::color::{ColorSetting, Ramp};
 use crate::config::{self, Display as DisplayConfig};
 use anyhow::{Result, bail};
 use std::ptr::null;
-use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::Foundation::{HWND, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
     CreateDCW, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, DISPLAY_DEVICEW, DeleteDC, EnumDisplayDevicesW,
-    HDC,
+    GetMonitorInfoW, HDC, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
 };
 use windows_sys::Win32::UI::ColorSystem::{GetDeviceGammaRamp, SetDeviceGammaRamp};
-use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
+};
 
 type GdiRamp = [u16; 3 * 256];
 
@@ -193,6 +195,46 @@ impl Backend for Gdi {
         unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
         (pid != 0).then_some(pid)
     }
+
+    fn focused_window(&mut self) -> FocusedWindow {
+        let hwnd: HWND = unsafe { GetForegroundWindow() };
+        if hwnd.is_null() {
+            return FocusedWindow::default();
+        }
+        let mut buf = [0u16; 512];
+        let n = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+        let title = (n > 0).then(|| String::from_utf16_lossy(&buf[..n as usize]));
+        FocusedWindow {
+            title,
+            fullscreen: covers_its_monitor(hwnd),
+        }
+    }
+}
+
+/// Whether `hwnd` covers the whole monitor it's on: fullscreen or borderless fullscreen. The
+/// desktop and the taskbar cover a screen too, but aren't apps.
+fn covers_its_monitor(hwnd: HWND) -> bool {
+    let mut class = [0u16; 64];
+    let n = unsafe { GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32) };
+    let class = String::from_utf16_lossy(&class[..n.max(0) as usize]);
+    if matches!(class.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd") {
+        return false;
+    }
+    let mut window: RECT = unsafe { std::mem::zeroed() };
+    if unsafe { GetWindowRect(hwnd, &mut window) } == 0 {
+        return false;
+    }
+    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    let mut info: MONITORINFO = unsafe { std::mem::zeroed() };
+    info.cbSize = size_of::<MONITORINFO>() as u32;
+    if unsafe { GetMonitorInfoW(monitor, &mut info) } == 0 {
+        return false;
+    }
+    let m = info.rcMonitor;
+    window.left <= m.left
+        && window.top <= m.top
+        && window.right >= m.right
+        && window.bottom >= m.bottom
 }
 
 impl Drop for Gdi {

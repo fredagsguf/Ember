@@ -12,9 +12,6 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
-/// How long to fade when the scheduled colour jumps instead of drifting (see [`is_jump`]).
-const JUMP_FADE: Duration = Duration::from_secs(7 * 60);
-
 /// A fade towards the scheduled colour after it jumped, started at `start` from `from`.
 struct JumpFade {
     from: ColorSetting,
@@ -214,7 +211,9 @@ fn run_locked(opts: &Options, rx: Receiver<Msg>, state: &Mutex<State>) -> Result
         // now), waking from sleep, or an edited schedule. Ease into those over minutes, one poll
         // at a time so rules, pausing and previews still react at once. While a rule or pause
         // takes over, the fade keeps running underneath.
+        let jump_fade = cfg.general.jump_fade_minutes * 60.0;
         if d.reason == Reason::Schedule
+            && jump_fade > 0.0
             && jump.is_none()
             && matches!(last_reason, None | Some(Reason::Schedule))
         {
@@ -227,8 +226,8 @@ fn run_locked(opts: &Options, rx: Receiver<Msg>, state: &Mutex<State>) -> Result
             }
         }
         if let Some(j) = &jump {
-            let t = j.start.elapsed().as_secs_f64() / JUMP_FADE.as_secs_f64();
-            if t >= 1.0 {
+            let t = j.start.elapsed().as_secs_f64() / jump_fade;
+            if t >= 1.0 || jump_fade <= 0.0 {
                 jump = None;
             } else if d.reason == Reason::Schedule {
                 d.setting = color::lerp(j.from, d.setting, t);
