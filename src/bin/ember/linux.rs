@@ -32,7 +32,7 @@ impl EmberTray {
 fn argb(size: u32, active: bool) -> ksni::Icon {
     let rgba = tray_model::icon_rgba(size, active);
     let mut data = Vec::with_capacity(rgba.len());
-    for p in rgba.chunks_exact(4) {
+    for p in rgba.as_chunks::<4>().0 {
         data.extend_from_slice(&[p[3], p[0], p[1], p[2]]);
     }
     ksni::Icon {

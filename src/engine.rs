@@ -69,8 +69,12 @@ impl ProcessWatcher {
     }
 
     /// Name of the process owning the foreground window. Only refreshes that one process.
+    /// On Wayland compositors that only report the window's app_id, that is the name instead.
     pub fn focused_name(&mut self, backend: &mut dyn Backend) -> Option<String> {
-        let pid = Pid::from_u32(backend.focused_pid()?);
+        let Some(pid) = backend.focused_pid() else {
+            return backend.focused_app_id().map(|id| rules::normalize(&id));
+        };
+        let pid = Pid::from_u32(pid);
         self.sys.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[pid]),
             true,

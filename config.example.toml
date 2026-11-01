@@ -27,7 +27,9 @@ transition_minutes = 45
 # ---------------------------------------------------------------------------
 # Per-application rules. The first matching rule wins.
 #
-#   processes   – process names; case-insensitive, ".exe" optional
+#   processes   – process names; case-insensitive, ".exe" optional. On wlroots
+#                 Wayland compositors (sway, Hyprland…) "focused" rules match the
+#                 window's app_id instead, e.g. "steam_app_730" or "org.mozilla.firefox"
 #   when        – "focused" (default): only while the app is in the foreground
 #                 "running": as long as the process exists
 #   temperature / brightness – override values. Leave both out to fully

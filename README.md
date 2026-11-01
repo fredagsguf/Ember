@@ -50,7 +50,7 @@ Warm, dim light in the evening is easier on the eyes and on your sleep. That's w
 
 **Warm colours not going below ~4000K?** Windows limits how warm apps can make the screen until a registry value is set (f.lux sets the same one). Double-click `enable-full-gamma-range.reg` from the zip (needs admin), then sign out and back in.
 
-### Linux (X11)
+### Linux
 
 There's no prebuilt package yet. Install from source with [Rust](https://rustup.rs):
 
@@ -60,6 +60,17 @@ ember
 ```
 
 Ember needs a StatusNotifierItem tray, which KDE, XFCE, Cinnamon, LXQt and waybar have built in. On GNOME, install the *AppIndicator and KStatusNotifierItem Support* extension. The settings window needs OpenGL and `libxkbcommon-x11`, which any normal desktop install has.
+
+What works depends on your session. Ember picks the right method by itself, and the tray shows an error if your desktop isn't supported:
+
+| Session | How Ember changes the colours | "Focused" rules match | Notes |
+|---|---|---|---|
+| X11, any desktop | RandR gamma ramps | process name | Everything works |
+| Wayland: sway, Hyprland, river, Wayfire, labwc and other wlroots compositors | `wlr-gamma-control` | the window's **app_id** | Only one program can own the gamma, so quit gammastep/wlsunset first |
+| Wayland: KDE Plasma 5.18+ | KDE's own Night Light | process name of X11/XWayland apps | See below |
+| Wayland: GNOME | not possible | — | GNOME doesn't let apps change the colours; use its built-in Night Light |
+
+**KDE Plasma on Wayland.** KWin doesn't let apps set colours, so Ember works through KDE's Night Light. Turn it on in *System Settings → Display & Monitor → Night Light* and pick the colour and times there. Ember then switches Night Light off while a rule disables Ember, while Ember is paused, and during the day by Ember's own schedule (set Ember's schedule to *always night* to leave the timing entirely to KDE). Ember's temperature and brightness sliders, and rules that set a custom colour, have no effect there, and the settings window can't preview. Focused rules see apps running through XWayland, which includes most games (Steam, Proton, Wine), but not native Wayland windows.
 
 ## Settings
 
@@ -105,12 +116,14 @@ Use *Start with Windows* (or *Start at login* on Linux) in the tray menu. Don't 
 
 ## Status and roadmap
 
-Ember is young. Windows 10/11 and Linux on X11 are supported; Wayland and macOS aren't yet.
+Ember is young. Windows 10/11, Linux on X11, and Wayland on wlroots compositors and KDE Plasma are supported; GNOME on Wayland and macOS aren't.
 
 - [x] Tray app with per-app rules, timed pause and autostart
 - [x] Settings window with live preview, sunset/sunrise schedule and rule editor
 - [x] Prebuilt Windows releases
-- [ ] Wayland (wlr-gamma-control for sway/Hyprland; GNOME/KDE night-light integration)
+- [x] Wayland: wlroots compositors (sway, Hyprland…) via wlr-gamma-control, KDE Plasma via its Night Light
+- [ ] Wayland: GNOME (GNOME has no API for apps to change the colours)
+- [ ] Wayland on KDE: detect focused native Wayland apps (only XWayland apps are seen today)
 - [ ] macOS
 - [ ] Global hotkey to toggle
 - [ ] Keep your calibration curve instead of resetting to neutral
@@ -135,6 +148,7 @@ when = "focused"         # or "running"
 - **Schedule**: `fixed` (clock times with a fade), `solar` (follows the sun at your latitude/longitude), or `always_night`.
 - **Rules**: the first match wins. `when = "focused"` applies only while the app is in the foreground; `"running"` applies as long as it's open. Leave out `temperature` and `brightness` to turn Ember off; set either to use that colour instead (e.g. a movie player at 5000K).
 - Process names are case-insensitive and `.exe` is optional, so one rule works on both Windows and Linux.
+- On wlroots Wayland compositors (sway, Hyprland…), `when = "focused"` rules match the focused window's **app_id** instead of its process name, because Wayland doesn't say which process owns a window. It's usually the program name (`firefox`, `mpv`) or a reverse-DNS id (`org.mozilla.firefox`); Steam games often show up as `steam_app_<id>` (CS2 is `steam_app_730`) or under the game's own name. `swaymsg -t get_tree` or `hyprctl clients` shows it, or tick *Disable while … is focused* in the tray, which uses the right name. `when = "running"` rules match process names everywhere.
 
 Command-line options:
 
@@ -158,7 +172,7 @@ cargo test
 cargo clippy --all-targets
 ```
 
-Layout: `src/lib.rs` is the library; `src/bin/ember/` is the tray app (`windows.rs` uses `tray-icon`, `linux.rs` uses `ksni`, `settings.rs` is the egui settings window). Library pieces: `daemon.rs` (run loop, single-instance lock), `tray_model.rs` (menu state, actions, icon drawing), `autostart.rs`, `color.rs` (Kelvin → RGB → gamma ramp), `solar.rs` (sun elevation), `schedule.rs`, `rules.rs` (per-app matching), `engine.rs` (decision + process watching), `gamma/` (platform backends).
+Layout: `src/lib.rs` is the library; `src/bin/ember/` is the tray app (`windows.rs` uses `tray-icon`, `linux.rs` uses `ksni`, `settings.rs` is the egui settings window). Library pieces: `daemon.rs` (run loop, single-instance lock), `tray_model.rs` (menu state, actions, icon drawing), `autostart.rs`, `color.rs` (Kelvin → RGB → gamma ramp), `solar.rs` (sun elevation), `schedule.rs`, `rules.rs` (per-app matching), `engine.rs` (decision + process watching), `gamma/` (platform backends: `windows.rs` GDI, `x11.rs` RandR, `wlroots.rs` wlr-gamma-control and foreign-toplevel, `kwin.rs` KDE Night Light over D-Bus; `gamma::open` picks one using `session.rs`).
 
 The logo is drawn in code (`icon_rgba` in `tray_model.rs`). `assets/ember.ico`, embedded in the exe, is generated from it with `cargo run --example make_ico`.
 
