@@ -256,13 +256,16 @@ pub fn open_in_default_app(path: &Path) -> Result<()> {
     };
     // ShellExecute returns a value <= 32 on failure (e.g. no app associated with .toml).
     if (r as isize) <= 32 {
-        let notepad = wide("notepad.exe".as_ref());
+        let notepad = format!(r"{}\notepad.exe", crate::gamma::system_dir()?);
+        let notepad = wide(notepad.as_ref());
+        let quoted = format!("\"{}\"", path.display());
+        let quoted = wide(quoted.as_ref());
         unsafe {
             ShellExecuteW(
                 std::ptr::null_mut(),
                 verb.as_ptr(),
                 notepad.as_ptr(),
-                file.as_ptr(),
+                quoted.as_ptr(),
                 std::ptr::null(),
                 SW_SHOWNORMAL,
             )
