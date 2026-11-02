@@ -277,7 +277,7 @@ impl Rule {
     pub fn presets() -> [(&'static str, Rule); 3] {
         [
             (
-                "Turn off for any fullscreen app",
+                "Off for fullscreen apps",
                 Rule {
                     name: Some("Fullscreen apps".into()),
                     fullscreen: true,
@@ -285,7 +285,7 @@ impl Rule {
                 },
             ),
             (
-                "Turn off for every Steam game",
+                "Off for Steam games",
                 Rule {
                     name: Some("Steam games".into()),
                     steam_games: true,
@@ -293,7 +293,7 @@ impl Rule {
                 },
             ),
             (
-                "Milder tint in video players",
+                "Milder in video players",
                 Rule {
                     name: Some("Video players".into()),
                     processes: VIDEO_PLAYERS.iter().map(|p| p.to_string()).collect(),

@@ -130,12 +130,33 @@ longitude = 12.57
 sunset_offset_minutes = 30
 "@
 
-# The README's screenshot: the top of the settings window beside its Apps & games section.
+# The README's screenshot: the settings window as it opens, which shows nearly everything.
 function Save-ReadmeScreenshot {
     $cfg = Write-Config 'readme' @"
+[schedule]
+bedtime = "23:00"
+
+[schedule.days]
+fri = { night_start = "23:30", night_end = "09:00" }
+sat = { night_start = "23:30", night_end = "09:00" }
+
+[[rules]]
+name = "Fullscreen apps"
+fullscreen = true
+
+[[rules]]
+name = "Steam games"
+steam_games = true
+
 [[rules]]
 name = "Counter-Strike 2"
 processes = ["cs2"]
+
+[[rules]]
+name = "YouTube in Firefox"
+processes = ["firefox"]
+titles = ["YouTube"]
+temperature = 5000
 "@
     $p = Start-Process $Exe -ArgumentList '--settings', '-c', "`"$cfg`"" -PassThru
     for ($i = 0; $i -lt 30 -and $p.MainWindowTitle -ne 'Ember settings'; $i++) {
@@ -149,39 +170,18 @@ processes = ["cs2"]
     $h = $p.MainWindowHandle
     Start-Sleep 3
     [Win]::Focus($h)
-    Start-Sleep 1
-    $grab = {
-        $r = [Win]::Frame($h)
-        # The window can be taller than the runner's screen; stop at the taskbar.
-        $bottom = [Math]::Min($r.Bottom, [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea.Bottom)
-        $bmp = New-Object System.Drawing.Bitmap ($r.Right - $r.Left), ($bottom - $r.Top)
-        $g = [System.Drawing.Graphics]::FromImage($bmp)
-        $g.CopyFromScreen($r.Left, $r.Top, 0, 0, $bmp.Size)
-        $g.Dispose()
-        $bmp
-    }
-    $top = & $grab
-    $r = [Win]::Frame($h)
-    [Win]::SetCursorPos([int](($r.Left + $r.Right) / 2), [int](($r.Top + $r.Bottom) / 2)) | Out-Null
-    for ($k = 0; $k -lt 3; $k++) {
-        [Win]::mouse_event(0x0800, 0, 0, -480, [UIntPtr]::Zero)
-        Start-Sleep -Milliseconds 400
-    }
     [Win]::SetCursorPos(0, 0) | Out-Null # no hover highlight in the picture
     Start-Sleep 1
-    $rules = & $grab
-    Stop-Process $p
-    $gap = 24
-    $picture = New-Object System.Drawing.Bitmap ($top.Width + $gap + $rules.Width), ([Math]::Max($top.Height, $rules.Height))
+    $r = [Win]::Frame($h)
+    # The window can be taller than the runner's screen; stop at the taskbar.
+    $bottom = [Math]::Min($r.Bottom, [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea.Bottom)
+    $picture = New-Object System.Drawing.Bitmap ($r.Right - $r.Left), ($bottom - $r.Top)
     $g = [System.Drawing.Graphics]::FromImage($picture)
-    $g.Clear([System.Drawing.Color]::Transparent)
-    $g.DrawImage($top, 0, 0, $top.Width, $top.Height)
-    $g.DrawImage($rules, $top.Width + $gap, 0, $rules.Width, $rules.Height)
+    $g.CopyFromScreen($r.Left, $r.Top, 0, 0, $picture.Size)
     $g.Dispose()
     $picture.Save((Join-Path $Out 'readme-settings.png'), [System.Drawing.Imaging.ImageFormat]::Png)
     $picture.Dispose()
-    $top.Dispose()
-    $rules.Dispose()
+    Stop-Process $p
 }
 Save-ReadmeScreenshot
 

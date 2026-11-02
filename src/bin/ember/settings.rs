@@ -124,6 +124,8 @@ struct SettingsApp {
     recording_hotkey: bool,
     /// Why the last key combination pressed can't be used.
     hotkey_error: Option<String>,
+    /// The rule open in the editor; the others show as one-line rows.
+    editing: Option<usize>,
 }
 
 /// Offline shortcut for setting a location. Sorted by name.
@@ -354,7 +356,7 @@ fn apply_theme(ctx: &egui::Context) {
     v.widgets.open = widget(CONTROL, Stroke::new(1.0, EMBER), TEXT, 6);
     ctx.set_visuals_of(egui::Theme::Dark, v);
     ctx.style_mut_of(egui::Theme::Dark, |s| {
-        s.spacing.item_spacing = egui::vec2(8.0, 7.0);
+        s.spacing.item_spacing = egui::vec2(8.0, 6.0);
         s.spacing.button_padding = egui::vec2(10.0, 4.0);
         s.spacing.interact_size.y = 24.0;
     });
@@ -428,6 +430,7 @@ impl SettingsApp {
             logo: None,
             recording_hotkey: false,
             hotkey_error: None,
+            editing: None,
         };
         me.sync_proc_text();
         me.refresh_running_apps();
@@ -551,12 +554,14 @@ fn kelvin_slider(
     value: &mut u32,
     range: std::ops::RangeInclusive<u32>,
 ) -> (bool, bool) {
-    let r = ui.add(
-        egui::Slider::new(value, range)
-            .step_by(50.0)
-            .suffix(" K")
-            .clamping(SliderClamping::Edits),
-    );
+    let r = ui
+        .add(
+            egui::Slider::new(value, range)
+                .step_by(50.0)
+                .suffix(" K")
+                .clamping(SliderClamping::Edits),
+        )
+        .on_hover_text("Lower is warmer; 6500 K is neutral. Drag to see it on screen.");
     (r.changed(), r.dragged() || r.has_focus())
 }
 
@@ -698,24 +703,103 @@ fn display_rows(connected: &[(String, String)], configured: &[config::Display]) 
     rows
 }
 
-fn section(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
-    ui.add_space(14.0);
-    ui.label(
-        RichText::new(title)
-            .strong()
-            .size(15.0)
-            .color(palette::EMBER_HOT),
-    );
-    ui.add_space(4.0);
+/// Width of the label column in the sections' grids, so their controls line up.
+const LABEL_WIDTH: f32 = 76.0;
+
+/// A grid row's label in a cell of [`LABEL_WIDTH`]. (A grid's `min_col_width` would widen
+/// every column, the narrow swatch column too.)
+fn row_label(ui: &mut Ui, text: &str) -> egui::Response {
+    ui.allocate_ui_with_layout(
+        egui::vec2(LABEL_WIDTH, ui.spacing().interact_size.y),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| ui.label(text),
+    )
+    .inner
+}
+
+fn section_title(title: &str) -> RichText {
+    RichText::new(title)
+        .strong()
+        .size(15.0)
+        .color(palette::EMBER_HOT)
+}
+
+fn section_card(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     egui::Frame::new()
         .fill(palette::CARD)
         .stroke(Stroke::new(1.0, palette::BORDER))
         .corner_radius(10.0)
-        .inner_margin(12.0)
+        .inner_margin(10.0)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             add(ui)
         });
+}
+
+fn section(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
+    ui.add_space(8.0);
+    ui.label(section_title(title))
+        .on_hover_text(section_help(title));
+    ui.add_space(2.0);
+    section_card(ui, add);
+}
+
+/// What a section is for, shown when hovering its title.
+fn section_help(title: &str) -> &'static str {
+    match title {
+        "Colour" => "How warm the screen gets. Lower is warmer; 6500 K is neutral.",
+        "Apps & games" => {
+            "Ember steps aside (or uses another colour) while these are in use. The first matching rule wins."
+        }
+        _ => "",
+    }
+}
+
+/// A section that starts folded, for settings most people never change.
+fn folded_section(ui: &mut Ui, title: &str, id: &str, add: impl FnOnce(&mut Ui)) {
+    ui.add_space(6.0);
+    egui::CollapsingHeader::new(section_title(title))
+        .id_salt(id)
+        .show_unindented(ui, |ui| section_card(ui, add));
+}
+
+/// Details inside a section, folded until asked for. `id` keeps it open while `title` changes.
+fn fold(ui: &mut Ui, id: &str, title: &str, add: impl FnOnce(&mut Ui)) {
+    egui::CollapsingHeader::new(title).id_salt(id).show(ui, add);
+}
+
+/// What a rule does, for its one-line row: "Off while active", "5000 K while running".
+fn rule_summary(rule: &Rule) -> String {
+    let action = match (rule.temperature, rule.brightness) {
+        (None, None) => "Off".to_string(),
+        (Some(k), _) => format!("{k} K"),
+        (None, Some(b)) => format!("{:.0} %", b * 100.0),
+    };
+    let when = match rule.when {
+        When::Focused => "while active",
+        When::Running => "while running",
+    };
+    format!("{action} {when}")
+}
+
+/// A rule folded to one line: its name, what it does, and a button to edit it. Removing is
+/// in the editor, a deliberate step away from a quick click.
+fn rule_row(ui: &mut Ui, rule: &Rule, editing: &mut Option<usize>, i: usize) {
+    ui.horizontal(|ui| {
+        let label = rule.label();
+        let label = if label.is_empty() {
+            "New rule".to_string()
+        } else {
+            label
+        };
+        ui.label(RichText::new(label).color(palette::TEXT));
+        ui.weak(rule_summary(rule));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.small_button("Edit").clicked() {
+                *editing = Some(i);
+            }
+        });
+    });
 }
 
 impl eframe::App for SettingsApp {
@@ -736,6 +820,9 @@ impl eframe::App for SettingsApp {
             }
         }
         self.reload_if_changed_on_disk();
+        if self.editing.is_some_and(|i| i >= self.cfg.rules.len()) {
+            self.editing = None;
+        }
         let before = self.cfg.clone();
         let mut preview: Option<ColorSetting> = None;
         let logo = self
@@ -757,61 +844,72 @@ impl eframe::App for SettingsApp {
                 // ── Header ─────────────────────────────────────────────
                 let now = schedule::scheduled_setting(&self.cfg, chrono::Local::now());
                 ui.horizontal(|ui| {
-                    ui.add(egui::Image::new(&logo).fit_to_exact_size(egui::vec2(44.0, 44.0)));
-                    ui.add_space(4.0);
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new("Ember").strong().size(22.0).color(palette::TEXT));
-                        ui.horizontal(|ui| {
-                            swatch(ui, now);
-                            let paused = if engine::paused().is_some() { " · paused" } else { "" };
-                            ui.label(format!("Right now {} K, {:.0} %{paused}", now.temperature, now.brightness * 100.0));
-                        });
-                    });
+                    ui.add(egui::Image::new(&logo).fit_to_exact_size(egui::vec2(32.0, 32.0)));
+                    ui.label(RichText::new("Ember").strong().size(20.0).color(palette::TEXT));
+                    ui.add_space(10.0);
+                    swatch(ui, now);
+                    let paused = if engine::paused().is_some() { " · paused" } else { "" };
+                    ui.label(format!("Right now {} K, {:.0} %{paused}", now.temperature, now.brightness * 100.0));
                 });
-                ui.add_space(2.0);
-                if self.preview_works {
-                    ui.weak("Drag a slider to preview it on screen.");
-                } else {
-                    ui.weak("Live preview isn't available on this display server.");
-                }
 
                 // ── Colour ─────────────────────────────────────────────
+                let bedtime_on = !self.cfg.schedule.bedtime.trim().is_empty();
                 section(ui, "Colour", |ui| {
-                    egui::Grid::new("colour").num_columns(3).spacing([12.0, 10.0]).show(ui, |ui| {
-                        let c = &mut self.cfg.color;
-                        ui.label("Night temperature");
-                        let (_, d) = kelvin_slider(ui, &mut c.night_temperature, 1200..=6500);
-                        if d {
-                            preview = Some(ColorSetting { temperature: c.night_temperature, brightness: c.night_brightness });
+                    let c = &mut self.cfg.color;
+                    let night = |c: &config::Color| ColorSetting { temperature: c.night_temperature, brightness: c.night_brightness };
+                    let bed = |c: &config::Color| ColorSetting { temperature: c.bedtime_temperature, brightness: c.bedtime_brightness };
+                    let day = |c: &config::Color| ColorSetting { temperature: c.day_temperature, brightness: c.day_brightness };
+                    egui::Grid::new("colour").num_columns(3).spacing([12.0, 8.0]).show(ui, |ui| {
+                        row_label(ui, "Night");
+                        if kelvin_slider(ui, &mut c.night_temperature, 1200..=6500).1 {
+                            preview = Some(night(c));
                         }
-                        swatch(ui, ColorSetting { temperature: c.night_temperature, brightness: c.night_brightness });
+                        swatch(ui, night(c));
                         ui.end_row();
-
-                        ui.label("Night brightness");
-                        let (_, d) = percent_slider(ui, &mut c.night_brightness);
-                        if d {
-                            preview = Some(ColorSetting { temperature: c.night_temperature, brightness: c.night_brightness });
+                        if bedtime_on {
+                            row_label(ui, "Bedtime");
+                            if kelvin_slider(ui, &mut c.bedtime_temperature, 1200..=6500).1 {
+                                preview = Some(bed(c));
+                            }
+                            swatch(ui, bed(c));
+                            ui.end_row();
                         }
-                        ui.label("");
-                        ui.end_row();
-
-                        ui.label("Day temperature");
-                        let (_, d) = kelvin_slider(ui, &mut c.day_temperature, 3000..=6500);
-                        if d {
-                            preview = Some(ColorSetting { temperature: c.day_temperature, brightness: c.day_brightness });
-                        }
-                        swatch(ui, ColorSetting { temperature: c.day_temperature, brightness: c.day_brightness });
-                        ui.end_row();
-
-                        ui.label("Day brightness");
-                        let (_, d) = percent_slider(ui, &mut c.day_brightness);
-                        if d {
-                            preview = Some(ColorSetting { temperature: c.day_temperature, brightness: c.day_brightness });
-                        }
-                        ui.label("");
-                        ui.end_row();
                     });
-                    ui.weak("6500 K is neutral. Lower is warmer. f.lux's default night setting is 3400 K.");
+                    if !self.preview_works {
+                        ui.weak("Live preview isn't available on this desktop.");
+                    }
+                    fold(ui, "brightness", "Brightness and daytime colour", |ui| {
+                        // Indented and with longer labels than the rows above: shorter sliders.
+                        ui.spacing_mut().slider_width -= 50.0;
+                        egui::Grid::new("colour-more").num_columns(3).spacing([12.0, 8.0]).show(ui, |ui| {
+                            ui.label("Night brightness");
+                            if percent_slider(ui, &mut c.night_brightness).1 {
+                                preview = Some(night(c));
+                            }
+                            ui.label("");
+                            ui.end_row();
+                            if bedtime_on {
+                                ui.label("Bedtime brightness");
+                                if percent_slider(ui, &mut c.bedtime_brightness).1 {
+                                    preview = Some(bed(c));
+                                }
+                                ui.label("");
+                                ui.end_row();
+                            }
+                            ui.label("Day colour");
+                            if kelvin_slider(ui, &mut c.day_temperature, 3000..=6500).1 {
+                                preview = Some(day(c));
+                            }
+                            swatch(ui, day(c));
+                            ui.end_row();
+                            ui.label("Day brightness");
+                            if percent_slider(ui, &mut c.day_brightness).1 {
+                                preview = Some(day(c));
+                            }
+                            ui.label("");
+                            ui.end_row();
+                        });
+                    });
                 });
 
                 // ── Schedule ───────────────────────────────────────────
@@ -822,96 +920,43 @@ impl eframe::App for SettingsApp {
                         ui.radio_value(&mut s.mode, ScheduleMode::Solar, "Sunset to sunrise");
                         ui.radio_value(&mut s.mode, ScheduleMode::AlwaysNight, "Always night");
                     });
-                    ui.add_space(6.0);
                     match s.mode {
                         ScheduleMode::Fixed => {
                             egui::Grid::new("fixed").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-                                ui.label("Night starts");
-                                ui.horizontal(|ui| time_edit(ui, "start", &mut s.night_start));
+                                row_label(ui, "Night");
+                                ui.horizontal(|ui| {
+                                    time_edit(ui, "start", &mut s.night_start);
+                                    ui.label("to");
+                                    time_edit(ui, "end", &mut s.night_end);
+                                });
                                 ui.end_row();
-                                ui.label("Night ends");
-                                ui.horizontal(|ui| time_edit(ui, "end", &mut s.night_end));
-                                ui.end_row();
-                                ui.label("Fade duration");
+                                row_label(ui, "Fade");
                                 ui.add(egui::Slider::new(&mut s.transition_minutes, 0..=180).suffix(" min"));
                                 ui.end_row();
                             });
-                            let any_days = (0..7).any(|i| s.days.get(i).is_some());
-                            egui::CollapsingHeader::new("Different times on some days")
-                                .default_open(any_days)
-                                .show(ui, |ui| {
-                                    let (start, end) = (s.night_start.clone(), s.night_end.clone());
-                                    egui::Grid::new("days").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-                                        for (i, day) in DAY_NAMES.iter().enumerate() {
-                                            let times = s.days.get_mut(i);
-                                            let mut own = times.is_some();
-                                            if ui.checkbox(&mut own, format!("{day} night")).changed() {
-                                                *times = own.then(|| DayTimes {
-                                                    night_start: start.clone(),
-                                                    night_end: end.clone(),
-                                                });
-                                            }
-                                            ui.horizontal(|ui| match times {
-                                                Some(t) => {
-                                                    time_edit(ui, &format!("day-start-{i}"), &mut t.night_start);
-                                                    ui.label("to");
-                                                    time_edit(ui, &format!("day-end-{i}"), &mut t.night_end);
-                                                }
-                                                None => {
-                                                    ui.weak(format!("{start} to {end}"));
-                                                }
-                                            });
-                                            ui.end_row();
-                                        }
-                                    });
-                                    ui.weak("A night belongs to the evening it starts on: Friday night ends on Saturday morning.");
-                                });
                         }
                         ScheduleMode::Solar => {
                             if s.latitude.is_none() || s.longitude.is_none() {
                                 s.latitude.get_or_insert(0.0);
                                 s.longitude.get_or_insert(0.0);
                             }
-                            egui::ComboBox::from_id_salt("city")
-                                .selected_text("Pick a nearby city…")
-                                .width(220.0)
-                                .show_ui(ui, |ui| {
-                                    for &(name, lat, lon) in CITIES {
-                                        if ui.selectable_label(false, name).clicked() {
-                                            s.latitude = Some(lat);
-                                            s.longitude = Some(lon);
-                                        }
-                                    }
-                                });
-                            ui.add_space(4.0);
                             egui::Grid::new("solar").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-                                ui.label("Latitude");
-                                ui.add(
-                                    egui::DragValue::new(s.latitude.as_mut().expect("set above"))
-                                        .range(-90.0..=90.0)
-                                        .speed(0.05)
-                                        .fixed_decimals(2)
-                                        .suffix("°"),
-                                );
-                                ui.end_row();
-                                ui.label("Longitude");
-                                ui.add(
-                                    egui::DragValue::new(s.longitude.as_mut().expect("set above"))
-                                        .range(-180.0..=180.0)
-                                        .speed(0.05)
-                                        .fixed_decimals(2)
-                                        .suffix("°"),
-                                );
-                                ui.end_row();
-                            });
-                            ui.weak("Pick a city or enter coordinates (north and east are positive). Ember never uses the network.");
-                            egui::Grid::new("offsets").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-                                let range = -config::MAX_SOLAR_OFFSET..=config::MAX_SOLAR_OFFSET;
-                                ui.label("Start the evening");
-                                ui.add(egui::Slider::new(&mut s.sunset_offset_minutes, range.clone()).custom_formatter(|v, _| offset_text(v)));
-                                ui.end_row();
-                                ui.label("Start the morning");
-                                ui.add(egui::Slider::new(&mut s.sunrise_offset_minutes, range).custom_formatter(|v, _| offset_text(v)));
+                                row_label(ui, "Location").on_hover_text("North and east are positive. Ember never uses the network.");
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::DragValue::new(s.latitude.as_mut().expect("set above")).range(-90.0..=90.0).speed(0.05).fixed_decimals(2).suffix("°"));
+                                    ui.add(egui::DragValue::new(s.longitude.as_mut().expect("set above")).range(-180.0..=180.0).speed(0.05).fixed_decimals(2).suffix("°"));
+                                    egui::ComboBox::from_id_salt("city")
+                                        .selected_text("Pick a city…")
+                                        .width(150.0)
+                                        .show_ui(ui, |ui| {
+                                            for &(name, lat, lon) in CITIES {
+                                                if ui.selectable_label(false, name).clicked() {
+                                                    s.latitude = Some(lat);
+                                                    s.longitude = Some(lon);
+                                                }
+                                            }
+                                        });
+                                });
                                 ui.end_row();
                             });
                             let (lat, lon) = (s.latitude.unwrap_or(0.0), s.longitude.unwrap_or(0.0));
@@ -920,89 +965,139 @@ impl eframe::App for SettingsApp {
                             }
                             let t = schedule::schedule_solar_times(s, chrono::Local::now().date_naive());
                             let fmt = |p: Option<(chrono::NaiveTime, chrono::NaiveTime)>| {
-                                p.map(|(a, b)| format!("{} to {}", a.format("%H:%M"), b.format("%H:%M")))
-                                    .unwrap_or_else(|| "none today".into())
+                                p.map(|(a, b)| format!("{}–{}", a.format("%H:%M"), b.format("%H:%M")))
+                                    .unwrap_or_else(|| "none".into())
                             };
-                            ui.label(format!("Today: evening fade {}, morning fade {}", fmt(t.evening), fmt(t.morning)));
+                            ui.weak(format!("Today the evening fade is {}, the morning fade {}.", fmt(t.evening), fmt(t.morning)));
                         }
                         ScheduleMode::AlwaysNight => {
-                            ui.weak("The night settings are used all the time.");
+                            ui.weak("The night colour is used all the time.");
                         }
                     }
 
-                    ui.add_space(6.0);
-                    let mut bedtime = !s.bedtime.trim().is_empty();
                     ui.horizontal(|ui| {
-                        if ui.checkbox(&mut bedtime, "Bedtime: even warmer from").changed() {
-                            s.bedtime = if bedtime { "23:00".into() } else { String::new() };
+                        let mut on = bedtime_on;
+                        if ui.checkbox(&mut on, "Bedtime: even warmer from")
+                            .on_hover_text("Fades to the bedtime colour over half an hour and keeps it until morning.")
+                            .changed()
+                        {
+                            s.bedtime = if on { "23:00".into() } else { String::new() };
                         }
-                        if bedtime {
+                        if on {
                             time_edit(ui, "bedtime", &mut s.bedtime);
                         }
                     });
-                    if bedtime {
-                        let c = &mut self.cfg.color;
-                        egui::Grid::new("bedtime").num_columns(3).spacing([12.0, 10.0]).show(ui, |ui| {
-                            let bed = |c: &config::Color| ColorSetting { temperature: c.bedtime_temperature, brightness: c.bedtime_brightness };
-                            ui.label("Bedtime temperature");
-                            let (_, d) = kelvin_slider(ui, &mut c.bedtime_temperature, 1200..=6500);
-                            if d {
-                                preview = Some(bed(c));
-                            }
-                            swatch(ui, bed(c));
-                            ui.end_row();
-                            ui.label("Bedtime brightness");
-                            let (_, d) = percent_slider(ui, &mut c.bedtime_brightness);
-                            if d {
-                                preview = Some(bed(c));
-                            }
-                            ui.label("");
-                            ui.end_row();
-                        });
-                        ui.weak("Fades in over half an hour and lasts until morning.");
+
+                    match s.mode {
+                        ScheduleMode::Fixed => {
+                            let set: Vec<&str> = (0..7).filter(|&i| s.days.get(i).is_some()).map(|i| &DAY_NAMES[i][..3]).collect();
+                            let title = if set.is_empty() { "Different times on some days".to_string() } else { format!("Different times on some days ({})", set.join(", ")) };
+                            fold(ui, "days", &title, |ui| {
+                                let (start, end) = (s.night_start.clone(), s.night_end.clone());
+                                egui::Grid::new("days").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+                                    for (i, day) in DAY_NAMES.iter().enumerate() {
+                                        let times = s.days.get_mut(i);
+                                        let mut own = times.is_some();
+                                        if ui.checkbox(&mut own, format!("{day} night")).changed() {
+                                            *times = own.then(|| DayTimes {
+                                                night_start: start.clone(),
+                                                night_end: end.clone(),
+                                            });
+                                        }
+                                        ui.horizontal(|ui| match times {
+                                            Some(t) => {
+                                                time_edit(ui, &format!("day-start-{i}"), &mut t.night_start);
+                                                ui.label("to");
+                                                time_edit(ui, &format!("day-end-{i}"), &mut t.night_end);
+                                            }
+                                            None => {
+                                                ui.weak(format!("{start} to {end}"));
+                                            }
+                                        });
+                                        ui.end_row();
+                                    }
+                                });
+                                ui.weak("A night belongs to the evening it starts on: Friday night ends on Saturday morning.");
+                            });
+                        }
+                        ScheduleMode::Solar => {
+                            let shifted = s.sunset_offset_minutes != 0 || s.sunrise_offset_minutes != 0;
+                            let title = if shifted { "Start earlier or later (shifted)" } else { "Start earlier or later" };
+                            fold(ui, "offsets", title, |ui| {
+                                egui::Grid::new("offsets").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                                    let range = -config::MAX_SOLAR_OFFSET..=config::MAX_SOLAR_OFFSET;
+                                    row_label(ui, "Evening");
+                                    ui.add(egui::Slider::new(&mut s.sunset_offset_minutes, range.clone()).custom_formatter(|v, _| offset_text(v)));
+                                    ui.end_row();
+                                    row_label(ui, "Morning");
+                                    ui.add(egui::Slider::new(&mut s.sunrise_offset_minutes, range).custom_formatter(|v, _| offset_text(v)));
+                                    ui.end_row();
+                                });
+                            });
+                        }
+                        ScheduleMode::AlwaysNight => {}
                     }
                 });
 
                 // ── Apps & games ───────────────────────────────────────
                 section(ui, "Apps & games", |ui| {
-                    ui.weak("Ember turns off (or uses a different colour) while these apps are in use. First match wins.");
-                    ui.add_space(6.0);
-                    for (label, preset) in Rule::presets() {
-                        let mut on = self.cfg.rules.contains(&preset);
-                        if ui.checkbox(&mut on, label).changed() {
-                            if on {
-                                self.cfg.rules.push(preset);
-                            } else {
-                                self.cfg.rules.retain(|r| *r != preset);
+                    egui::Grid::new("presets").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+                        for (n, (label, preset)) in Rule::presets().into_iter().enumerate() {
+                            let mut on = self.cfg.rules.contains(&preset);
+                            if ui.checkbox(&mut on, label).changed() {
+                                if on {
+                                    self.cfg.rules.push(preset);
+                                } else {
+                                    self.cfg.rules.retain(|r| *r != preset);
+                                }
+                                self.editing = None;
+                                self.sync_proc_text();
                             }
-                            self.sync_proc_text();
+                            if n % 2 == 1 {
+                                ui.end_row();
+                            }
                         }
-                    }
-                    ui.add_space(6.0);
+                    });
+                    // The ready-made rules show as their checkboxes above, not again in the list.
+                    let presets: Vec<Rule> = Rule::presets().into_iter().map(|(_, r)| r).collect();
                     let mut remove = None;
                     for (i, rule) in self.cfg.rules.iter_mut().enumerate() {
+                        if presets.contains(rule) && self.editing != Some(i) {
+                            continue;
+                        }
                         ui.push_id(i, |ui| {
                             egui::Frame::new()
-                                .fill(ui.visuals().faint_bg_color)
+                                .fill(palette::CARD_RAISED)
                                 .corner_radius(6.0)
-                                .inner_margin(8.0)
+                                .inner_margin(egui::Margin::symmetric(8, 5))
                                 .show(ui, |ui| {
                                     ui.set_width(ui.available_width());
-                                    rule_editor(ui, rule, &mut self.proc_text[i], &mut self.title_text[i], &mut preview, &mut remove, i);
+                                    if self.editing == Some(i) {
+                                        match rule_editor(ui, rule, &mut self.proc_text[i], &mut self.title_text[i], &mut preview) {
+                                            Some(EditorAction::Done) => self.editing = None,
+                                            Some(EditorAction::Remove) => remove = Some(i),
+                                            None => {}
+                                        }
+                                    } else {
+                                        rule_row(ui, rule, &mut self.editing, i);
+                                    }
                                 });
                         });
-                        ui.add_space(4.0);
                     }
                     if let Some(i) = remove {
                         self.cfg.rules.remove(i);
                         self.proc_text.remove(i);
                         self.title_text.remove(i);
+                        self.editing = match self.editing {
+                            Some(e) if e == i => None,
+                            Some(e) if e > i => Some(e - 1),
+                            e => e,
+                        };
                     }
 
-                    ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         egui::ComboBox::from_id_salt("running")
-                            .width(220.0)
+                            .width(200.0)
                             .selected_text(if self.new_app.is_empty() { "Pick a running app…" } else { &self.new_app })
                             .show_ui(ui, |ui| {
                                 for n in &self.running_apps {
@@ -1023,15 +1118,17 @@ impl eframe::App for SettingsApp {
                             });
                             self.proc_text.push(app);
                             self.title_text.push(String::new());
+                            self.editing = Some(self.cfg.rules.len() - 1);
                         }
                     });
                 });
 
                 // ── Displays ───────────────────────────────────────────
                 if self.displays.len() >= 2 || !self.cfg.displays.is_empty() {
-                    section(ui, "Displays", |ui| {
+                    let untinted = self.cfg.displays.iter().filter(|d| !d.tint).count();
+                    let title = if untinted == 0 { "Displays".to_string() } else { format!("Displays ({untinted} left alone)") };
+                    folded_section(ui, &title, "displays", |ui| {
                         ui.weak("Untick a colour-critical screen, such as one for photo editing, to leave it alone. It keeps its calibration.");
-                        ui.add_space(6.0);
                         let rows = display_rows(&self.displays, &self.cfg.displays);
                         egui::Grid::new("displays").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
                             for row in &rows {
@@ -1057,7 +1154,7 @@ impl eframe::App for SettingsApp {
                 }
 
                 // ── Advanced ───────────────────────────────────────────
-                section(ui, "Advanced", |ui| {
+                folded_section(ui, "Advanced", "advanced", |ui| {
                     egui::Grid::new("adv").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
                         let g = &mut self.cfg.general;
                         ui.label("Fade when an app rule switches");
@@ -1095,16 +1192,16 @@ impl eframe::App for SettingsApp {
                         }
                     });
                     ui.horizontal(|ui| {
-                        if ui.button("Open config file").clicked() {
+                        if ui.button("Open config file").on_hover_text(self.path.display().to_string()).clicked() {
                             let _ = config::ensure_exists(&self.path);
                             let _ = tray_model::open_in_default_app(&self.path);
                         }
                         if ui.button("Reset to defaults").clicked() {
                             self.cfg = Config::parse(config::DEFAULT_CONFIG).unwrap_or_default();
+                            self.editing = None;
                             self.sync_proc_text();
                         }
                     });
-                    ui.weak(self.path.display().to_string());
                 });
 
                 ui.add_space(8.0);
@@ -1179,15 +1276,20 @@ impl eframe::App for SettingsApp {
     }
 }
 
+/// What the user asked of the rule editor, besides editing.
+enum EditorAction {
+    Done,
+    Remove,
+}
+
 fn rule_editor(
     ui: &mut Ui,
     rule: &mut Rule,
     procs: &mut String,
     titles: &mut String,
     preview: &mut Option<ColorSetting>,
-    remove: &mut Option<usize>,
-    i: usize,
-) {
+) -> Option<EditorAction> {
+    let mut action = None;
     ui.horizontal(|ui| {
         let mut name = rule.name.clone().unwrap_or_default();
         let r = ui.add(
@@ -1199,8 +1301,11 @@ fn rule_editor(
             rule.name = (!name.trim().is_empty()).then_some(name);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("Done").clicked() {
+                action = Some(EditorAction::Done);
+            }
             if ui.button("Remove").clicked() {
-                *remove = Some(i);
+                action = Some(EditorAction::Remove);
             }
         });
     });
@@ -1311,6 +1416,7 @@ fn rule_editor(
             "Add a process or a window title, or tick fullscreen or Steam games.",
         );
     }
+    action
 }
 
 #[cfg(test)]
