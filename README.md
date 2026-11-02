@@ -66,7 +66,7 @@ Works on X11, and on Wayland with KDE Plasma, sway, Hyprland and other wlroots c
 
 ## Using Ember
 
-Click the tray icon to open the settings, right above the icon. Drag a slider and your screen shows that colour while you hold it. Changes save on their own.
+Click the tray icon to open the settings, right above the icon, and click it again to put them away. Drag a slider and your screen shows that colour while you hold it. Changes save on their own.
 
 <p align="center">
   <img src="docs/settings.png" width="860" alt="Ember's settings window: colour sliders and schedule on the left; on the right, Apps &amp; games with one-tick options for fullscreen apps, Steam games and video players, and a rule that turns Ember off for fullscreen windows">
