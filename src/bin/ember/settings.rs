@@ -703,6 +703,9 @@ fn display_rows(connected: &[(String, String)], configured: &[config::Display]) 
     rows
 }
 
+/// Ember's license, shown under About (releases ship only the binary).
+const LICENSE: &str = include_str!("../../../LICENSE");
+
 /// Width of the label column in the sections' grids, so their controls line up.
 const LABEL_WIDTH: f32 = 76.0;
 
@@ -1201,6 +1204,19 @@ impl eframe::App for SettingsApp {
                             self.editing = None;
                             self.sync_proc_text();
                         }
+                    });
+                });
+
+                // ── About ──────────────────────────────────────────────
+                folded_section(ui, "About", "about", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(concat!("Ember ", env!("CARGO_PKG_VERSION")));
+                        ui.hyperlink_to("GitHub", env!("CARGO_PKG_REPOSITORY"));
+                    });
+                    fold(ui, "license", "License (MIT)", |ui| {
+                        egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
+                            ui.weak(LICENSE);
+                        });
                     });
                 });
 

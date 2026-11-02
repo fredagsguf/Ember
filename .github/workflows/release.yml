@@ -73,18 +73,18 @@ jobs:
         run: |
           $name = "${{ steps.version.outputs.name }}"
           $bin = "target/${{ env.TARGET }}/release"
-          New-Item -ItemType Directory -Path "dist/$name" | Out-Null
-          Copy-Item "$bin/ember.exe", README.md, LICENSE, config.example.toml -Destination "dist/$name"
-          Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
-          $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
-          "$hash  $name.zip" | Out-File -Encoding ascii "dist/$name.zip.sha256"
-          Get-Content "dist/$name.zip.sha256"
+          # Just the exe: the default config and the license are built into it.
+          New-Item -ItemType Directory -Path dist | Out-Null
+          Copy-Item "$bin/ember.exe" -Destination "dist/$name.exe"
+          $hash = (Get-FileHash "dist/$name.exe" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.exe" | Out-File -Encoding ascii "dist/$name.exe.sha256"
+          Get-Content "dist/$name.exe.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.version.outputs.name }}
           path: |
-            dist/*.zip
+            dist/*.exe
             dist/*.sha256
 
   linux:
@@ -160,13 +160,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${{ github.ref_name }}"
-          win="ember-$tag-windows-x64.zip"
+          win="ember-$tag-windows-x64.exe"
           linux="ember-$tag-linux-x64.tar.gz"
           cat > notes.md <<EOF
           ## Windows 10/11
 
-          1. Download \`$win\` below and extract it anywhere (e.g. \`%LOCALAPPDATA%\Programs\Ember\`).
-          2. Run **ember.exe**. Ember appears in the system tray: click it for settings, right-click for the menu.
+          1. Download \`$win\` below and move it to where it should stay (e.g. \`%LOCALAPPDATA%\Programs\Ember\`),
+             since *Start with Windows* remembers that location.
+          2. Run it. Ember appears in the system tray: click it for settings, right-click for the menu.
           3. Optional: tick **Start with Windows** in the tray menu.
 
           **"Windows protected your PC"**: ember.exe isn't code-signed yet, so SmartScreen warns
