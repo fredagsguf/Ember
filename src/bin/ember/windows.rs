@@ -214,6 +214,9 @@ pub fn run(daemon: Handle, config_path: PathBuf) -> Result<()> {
     // Report the tray icon's position in real pixels, the same units the settings window
     // (winit) uses; otherwise Windows scales it on high-DPI displays.
     unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+    if let Err(e) = ember::autostart::follow_current_exe() {
+        log::warn!("couldn't update Start with Windows: {e:#}");
+    }
     let status = MenuItem::new("Starting…", false, None);
     let enabled = CheckMenuItem::new("Enabled", true, true, None);
     let disable_items: Vec<(MenuItem, u64)> = DISABLE_OPTIONS

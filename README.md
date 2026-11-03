@@ -41,9 +41,11 @@ A warm screen in the evening is easier on your eyes and your sleep. But in a gam
 
 ### Windows
 
-1. Download `ember-…-windows-x64.exe` from **[Releases](https://github.com/fredagsguf/Ember/releases/latest)** and move it to where it should stay (e.g. `%LOCALAPPDATA%\Programs\Ember\`), since *Start with Windows* remembers that location.
+1. Download `ember-…-windows-x64.exe` from **[Releases](https://github.com/fredagsguf/Ember/releases/latest)** and put it somewhere it can stay (e.g. `%LOCALAPPDATA%\Programs\Ember\`).
 2. Run it. It sits in the system tray (Windows 11 may hide it behind the **^** next to the clock).
 3. Optional: tick **Start with Windows** in the tray menu.
+
+To update, quit Ember and run the new download. *Start with Windows* switches to it.
 
 The first launch shows *"Windows protected your PC"* because Ember isn't code-signed yet. Click **More info → Run anyway**.
 

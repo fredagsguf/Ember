@@ -96,3 +96,12 @@ pub fn is_enabled() -> bool {
 pub fn set_enabled(on: bool) -> Result<()> {
     imp::set_enabled(on)
 }
+
+/// If autostart is on, point it at this exe. A new release is a new file (often somewhere else),
+/// so running it once is then enough for it to start at login instead of the old one.
+pub fn follow_current_exe() -> Result<()> {
+    if is_enabled() {
+        set_enabled(true)?;
+    }
+    Ok(())
+}
