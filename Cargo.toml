@@ -1,6 +1,6 @@
 [package]
 name = "ember"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 description = "Open-source f.lux alternative with per-game rules"
 license = "MIT"
