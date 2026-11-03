@@ -238,12 +238,11 @@ pub fn perform(action: Action, daemon: &Handle, config_path: &Path) -> Result<bo
 
 #[cfg(windows)]
 pub fn open_in_default_app(path: &Path) -> Result<()> {
-    use std::os::windows::ffi::OsStrExt;
+    use crate::win::{system_dir, wide};
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-    let wide = |s: &std::ffi::OsStr| s.encode_wide().chain(Some(0)).collect::<Vec<u16>>();
-    let file = wide(path.as_os_str());
-    let verb = wide("open".as_ref());
+    let file = wide(path);
+    let verb = wide("open");
     let r = unsafe {
         ShellExecuteW(
             std::ptr::null_mut(),
@@ -256,10 +255,11 @@ pub fn open_in_default_app(path: &Path) -> Result<()> {
     };
     // ShellExecute returns a value <= 32 on failure (e.g. no app associated with .toml).
     if (r as isize) <= 32 {
-        let notepad = format!(r"{}\notepad.exe", crate::gamma::system_dir()?);
-        let notepad = wide(notepad.as_ref());
-        let quoted = format!("\"{}\"", path.display());
-        let quoted = wide(quoted.as_ref());
+        let notepad = wide(system_dir()?.join("notepad.exe"));
+        let mut quoted = std::ffi::OsString::from("\"");
+        quoted.push(path);
+        quoted.push("\"");
+        let quoted = wide(quoted);
         unsafe {
             ShellExecuteW(
                 std::ptr::null_mut(),

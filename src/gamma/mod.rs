@@ -14,7 +14,7 @@ pub mod session;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{allow_full_gamma_range, full_gamma_range_allowed, system_dir};
+pub use windows::{allow_full_gamma_range, full_gamma_range_allowed};
 #[cfg(target_os = "linux")]
 mod wlroots;
 #[cfg(target_os = "linux")]

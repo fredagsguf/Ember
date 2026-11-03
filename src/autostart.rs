@@ -4,8 +4,8 @@ use anyhow::Result;
 
 #[cfg(windows)]
 mod imp {
+    use crate::win::wide;
     use anyhow::{Result, bail};
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::ERROR_SUCCESS;
     use windows_sys::Win32::System::Registry::{
         HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW,
@@ -14,12 +14,8 @@ mod imp {
     const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
     const VALUE: &str = "Ember";
 
-    fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
-        s.encode_wide().chain(Some(0)).collect()
-    }
-
     pub fn is_enabled() -> bool {
-        let (key, val) = (wide(RUN_KEY.as_ref()), wide(VALUE.as_ref()));
+        let (key, val) = (wide(RUN_KEY), wide(VALUE));
         let r = unsafe {
             RegGetValueW(
                 HKEY_CURRENT_USER,
@@ -35,11 +31,11 @@ mod imp {
     }
 
     pub fn set_enabled(on: bool) -> Result<()> {
-        let (key, val) = (wide(RUN_KEY.as_ref()), wide(VALUE.as_ref()));
+        let (key, val) = (wide(RUN_KEY), wide(VALUE));
         let r = if on {
             let exe = std::env::current_exe()?;
             let cmd = format!("\"{}\"", exe.display());
-            let data = wide(cmd.as_ref());
+            let data = wide(&cmd);
             unsafe {
                 RegSetKeyValueW(
                     HKEY_CURRENT_USER,

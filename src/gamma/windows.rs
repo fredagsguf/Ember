@@ -12,6 +12,7 @@ use super::calibration::Calibration;
 use super::{Backend, FocusedWindow};
 use crate::color::{ColorSetting, Ramp};
 use crate::config::{self, Display as DisplayConfig};
+use crate::win::{system_dir, wide};
 use anyhow::{Result, bail};
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{
@@ -22,7 +23,6 @@ use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, HDC, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
 };
 use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RegGetValueW};
-use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
 use windows_sys::Win32::UI::ColorSystem::{GetDeviceGammaRamp, SetDeviceGammaRamp};
 use windows_sys::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
@@ -57,24 +57,6 @@ const FULL_RANGE: u32 = 256;
 /// Below this, a ramp that Windows accepts shows the limit isn't in the way.
 const WARM_K: u32 = 4000;
 
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(Some(0)).collect()
-}
-
-/// The System32 directory, e.g. `C:\Windows\System32`. Programs Ember starts from there are
-/// named by full path, so a same-named exe in the current directory is never picked up.
-pub fn system_dir() -> Result<String> {
-    let mut buf = [0u16; 260];
-    let n = unsafe { GetSystemDirectoryW(buf.as_mut_ptr(), buf.len() as u32) } as usize;
-    if n == 0 || n >= buf.len() {
-        bail!(
-            "couldn't find the system directory: {}",
-            std::io::Error::last_os_error()
-        );
-    }
-    Ok(String::from_utf16(&buf[..n])?)
-}
-
 /// Is `GdiIcmGammaRange` set so that apps may make the screen warmer than about 4000K?
 /// (It takes effect only after signing out and back in.)
 pub fn full_gamma_range_allowed() -> bool {
@@ -100,9 +82,9 @@ pub fn full_gamma_range_allowed() -> bool {
 pub fn allow_full_gamma_range() -> Result<bool> {
     let sys = system_dir()?;
     let verb = wide("runas");
-    let file = wide(&format!(r"{sys}\reg.exe"));
+    let file = wide(sys.join("reg.exe"));
     let dir = wide(&sys);
-    let params = wide(&format!(
+    let params = wide(format!(
         r#"add "HKLM\{ICM_KEY}" /v {GAMMA_RANGE} /t REG_DWORD /d {FULL_RANGE} /f"#
     ));
     let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
@@ -349,17 +331,5 @@ impl Drop for Gdi {
         for d in &self.displays {
             unsafe { DeleteDC(d.hdc) };
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn system_dir_holds_reg_exe() {
-        let sys = std::path::PathBuf::from(system_dir().unwrap());
-        assert!(sys.is_absolute());
-        assert!(sys.join("reg.exe").is_file());
     }
 }

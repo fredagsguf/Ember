@@ -4,7 +4,9 @@ use anyhow::{Context, Result};
 use ember::daemon::Handle;
 use ember::hotkey::{Hotkey, Key, Modifiers};
 use ember::tray_model::{self, Action, Anchor, DISABLE_OPTIONS, View};
+use ember::win::wide;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use tray_icon::menu::{
     CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
 };
@@ -20,16 +22,29 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, FindWindowW, IsIconic, MB_ICONERROR, MB_ICONINFORMATION, MB_OK,
     MESSAGEBOX_STYLE, MSG, MessageBoxW, MsgWaitForMultipleObjects, PM_REMOVE, PeekMessageW,
-    QS_ALLINPUT, SW_MINIMIZE, SW_RESTORE, SetForegroundWindow, ShowWindow, TranslateMessage,
-    WM_HOTKEY, WM_QUIT,
+    PostMessageW, QS_ALLINPUT, RegisterWindowMessageW, SW_MINIMIZE, SW_RESTORE,
+    SetForegroundWindow, ShowWindow, TranslateMessage, WM_HOTKEY, WM_QUIT,
 };
 
 /// Our only `RegisterHotKey` id; `WM_HOTKEY` carries it in `wParam`.
 const HOTKEY_ID: i32 = 1;
 
+/// How often to check that the tray icon is still there.
+const ICON_CHECK: Duration = Duration::from_secs(5);
+
+/// Ask `tray-icon` to add the icon again, the way it does when Explorer restarts. Right after
+/// login the taskbar can be too busy to take the icon, and nothing would try again.
+fn readd_tray_icon(tray: &tray_icon::TrayIcon) {
+    let name = wide("TaskbarCreated");
+    unsafe {
+        let msg = RegisterWindowMessageW(name.as_ptr());
+        PostMessageW(tray.window_handle(), msg, 0, 0);
+    }
+}
+
 /// The settings window, if it's open.
 fn settings_window() -> Option<HWND> {
-    let title: Vec<u16> = "Ember settings".encode_utf16().chain(Some(0)).collect();
+    let title = wide("Ember settings");
     let hwnd = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
     (!hwnd.is_null()).then_some(hwnd)
 }
@@ -94,7 +109,6 @@ fn info_box(text: &str) {
 }
 
 fn show_box(text: &str, icon: MESSAGEBOX_STYLE) {
-    let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
     let (t, c) = (wide(text), wide("Ember"));
     unsafe { MessageBoxW(std::ptr::null_mut(), t.as_ptr(), c.as_ptr(), MB_OK | icon) };
 }
@@ -268,6 +282,8 @@ pub fn run(daemon: Handle, config_path: PathBuf) -> Result<()> {
 
     let mut last: Option<View> = None;
     let mut hotkey = GlobalHotkey::default();
+    let mut next_icon_check = Instant::now() + ICON_CHECK;
+    let mut icon_missing = false;
     loop {
         // Sleep until a window message arrives or 250ms pass, then drain the queue.
         unsafe { MsgWaitForMultipleObjects(0, std::ptr::null(), 0, 250, QS_ALLINPUT) };
@@ -369,6 +385,27 @@ pub fn run(daemon: Handle, config_path: PathBuf) -> Result<()> {
                 let _ = tray.set_icon(Some(icon(v.active)?));
             }
             last = Some(v);
+        }
+
+        // Setting the tooltip is the probe: it fails while the taskbar doesn't have our icon.
+        if let Some(v) = &last
+            && Instant::now() >= next_icon_check
+        {
+            next_icon_check = Instant::now() + ICON_CHECK;
+            let missing = tray.set_tooltip(Some(&v.tooltip)).is_err();
+            if missing != icon_missing {
+                if missing {
+                    log::warn!("the tray icon is missing; adding it again");
+                } else {
+                    log::info!("the tray icon is back");
+                }
+                icon_missing = missing;
+            }
+            if missing {
+                readd_tray_icon(&tray);
+                // Updates made while it was gone didn't reach tray-icon's copy; redo them.
+                last = None;
+            }
         }
     }
 }
