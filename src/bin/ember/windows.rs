@@ -4,8 +4,10 @@ use anyhow::{Context, Result};
 use ember::daemon::Handle;
 use ember::hotkey::{Hotkey, Key, Modifiers};
 use ember::tray_model::{self, Action, Anchor, DISABLE_OPTIONS, View};
+use ember::update::{self, Release};
 use ember::win::wide;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 use tray_icon::menu::{
     CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
@@ -20,10 +22,11 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, UnregisterHotKey, VIRTUAL_KEY,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, FindWindowW, IsIconic, MB_ICONERROR, MB_ICONINFORMATION, MB_OK,
-    MESSAGEBOX_STYLE, MSG, MessageBoxW, MsgWaitForMultipleObjects, PM_REMOVE, PeekMessageW,
-    PostMessageW, QS_ALLINPUT, RegisterWindowMessageW, SW_MINIMIZE, SW_RESTORE,
-    SetForegroundWindow, ShowWindow, TranslateMessage, WM_HOTKEY, WM_QUIT,
+    DispatchMessageW, FindWindowW, IDYES, IsIconic, MB_ICONERROR, MB_ICONINFORMATION,
+    MB_ICONQUESTION, MB_OK, MB_YESNO, MESSAGEBOX_RESULT, MESSAGEBOX_STYLE, MSG, MessageBoxW,
+    MsgWaitForMultipleObjects, PM_REMOVE, PeekMessageW, PostMessageW, QS_ALLINPUT,
+    RegisterWindowMessageW, SW_MINIMIZE, SW_RESTORE, SetForegroundWindow, ShowWindow,
+    TranslateMessage, WM_HOTKEY, WM_QUIT,
 };
 
 /// Our only `RegisterHotKey` id; `WM_HOTKEY` carries it in `wParam`.
@@ -101,16 +104,65 @@ fn warm_label(refused: bool) -> Option<(&'static str, bool)> {
 }
 
 pub fn message_box(text: &str) {
-    show_box(text, MB_ICONERROR);
+    show_box(text, MB_OK | MB_ICONERROR);
 }
 
 fn info_box(text: &str) {
-    show_box(text, MB_ICONINFORMATION);
+    show_box(text, MB_OK | MB_ICONINFORMATION);
 }
 
-fn show_box(text: &str, icon: MESSAGEBOX_STYLE) {
+/// A Yes/No question. True for Yes.
+fn ask(text: &str) -> bool {
+    show_box(text, MB_YESNO | MB_ICONQUESTION) == IDYES
+}
+
+fn show_box(text: &str, style: MESSAGEBOX_STYLE) -> MESSAGEBOX_RESULT {
     let (t, c) = (wide(text), wide("Ember"));
-    unsafe { MessageBoxW(std::ptr::null_mut(), t.as_ptr(), c.as_ptr(), MB_OK | icon) };
+    unsafe { MessageBoxW(std::ptr::null_mut(), t.as_ptr(), c.as_ptr(), style) }
+}
+
+/// Ask before updating, then download and install on a background thread so the tray stays
+/// responsive. `None` if the user said no.
+fn start_update(release: &Release, config_path: &Path) -> Option<Receiver<Result<()>>> {
+    let question = format!(
+        "Ember {} is available (you have {}).\n\nDownload it from GitHub and restart Ember \
+         with it now?",
+        release.tag,
+        update::version_text(update::current_version()),
+    );
+    if !ask(&question) {
+        return None;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (release, config_path) = (release.clone(), config_path.to_path_buf());
+    std::thread::spawn(move || {
+        let _ = tx.send(update::install(&release, &config_path));
+    });
+    Some(rx)
+}
+
+/// An update that couldn't be installed: say why and offer the download page instead.
+fn update_failed(release: &Release, e: &anyhow::Error) {
+    log::error!("update to {} failed: {e:#}", release.tag);
+    let text = format!(
+        "Couldn't update Ember: {e:#}\n\nOpen the download page for Ember {} instead?",
+        release.tag
+    );
+    if show_box(&text, MB_YESNO | MB_ICONERROR) == IDYES
+        && let Err(e) = tray_model::open_in_default_app(Path::new(&release.page))
+    {
+        message_box(&format!("{e:#}"));
+    }
+}
+
+/// The tray menu entry for an update: (label, clickable), or `None` while there's nothing new.
+fn update_label(available: Option<&Release>, installing: bool) -> Option<(String, bool)> {
+    let r = available?;
+    Some(if installing {
+        (format!("Downloading Ember {}…", r.tag), false)
+    } else {
+        (format!("Update to Ember {}…", r.tag), true)
+    })
 }
 
 fn virtual_key(key: Key) -> VIRTUAL_KEY {
@@ -229,12 +281,18 @@ pub fn run(daemon: Handle, config_path: PathBuf) -> Result<()> {
     }
     let app = CheckMenuItem::new("Disable for current app", false, false, None);
     let autostart = CheckMenuItem::new("Start with Windows", true, false, None);
+    let updates = CheckMenuItem::new("Check for updates", true, false, None);
     let settings = MenuItem::new("Settings…", true, None);
     let open_cfg = MenuItem::new("Open config file", true, None);
     let quit = MenuItem::new("Quit Ember", true, None);
     // Only in the menu while Windows refuses warm colours; see `warm_label`.
     let warm = MenuItem::new("Allow warmer colours…", true, None);
     let mut warm_shown = false;
+    // Only in the menu once a check has found a newer release; see `update_label`.
+    let update_item = MenuItem::new("Update", true, None);
+    let mut update_shown: Option<(String, bool)> = None;
+    let mut checker = update::Checker::new();
+    let mut installing: Option<(Release, Receiver<Result<()>>)> = None;
 
     let menu = Menu::new();
     menu.append_items(&[
@@ -246,6 +304,7 @@ pub fn run(daemon: Handle, config_path: PathBuf) -> Result<()> {
         &PredefinedMenuItem::separator(),
         &settings,
         &autostart,
+        &updates,
         &open_cfg,
         &PredefinedMenuItem::separator(),
         &quit,
@@ -269,6 +328,8 @@ pub fn run(daemon: Handle, config_path: PathBuf) -> Result<()> {
             Some(Action::ToggleAppRule)
         } else if id == autostart.id() {
             Some(Action::ToggleAutostart)
+        } else if id == updates.id() {
+            Some(Action::ToggleUpdateCheck)
         } else if id == settings.id() {
             Some(Action::OpenSettings(anchor))
         } else if id == open_cfg.id() {
@@ -332,6 +393,15 @@ pub fn run(daemon: Handle, config_path: PathBuf) -> Result<()> {
                 last = None;
                 continue;
             }
+            if ev.id() == update_item.id() {
+                if installing.is_none()
+                    && let Some(r) = checker.available().cloned()
+                    && let Some(rx) = start_update(&r, &config_path)
+                {
+                    installing = Some((r, rx));
+                }
+                continue;
+            }
             actions.extend(action_for(ev.id(), anchor));
         }
         for action in actions {
@@ -352,11 +422,47 @@ pub fn run(daemon: Handle, config_path: PathBuf) -> Result<()> {
         let v = tray_model::view(&daemon.state());
         // Follows config reloads, including edits from the settings window.
         hotkey.set(v.hotkey);
+
+        // Off by default: `poll` doesn't go online unless the config turns checks on.
+        checker.poll(v.check_updates, Instant::now());
+        if let Some((r, rx)) = &installing {
+            match rx.try_recv() {
+                Err(TryRecvError::Empty) => {}
+                // The new Ember is starting and waits for this one to quit.
+                Ok(Ok(())) => return Ok(()),
+                Ok(Err(e)) => {
+                    update_failed(r, &e);
+                    installing = None;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    update_failed(r, &anyhow::anyhow!("the download stopped unexpectedly"));
+                    installing = None;
+                }
+            }
+        }
+        let wanted = update_label(checker.available(), installing.is_some());
+        if wanted != update_shown {
+            match &wanted {
+                Some((label, enabled)) => {
+                    update_item.set_text(label);
+                    update_item.set_enabled(*enabled);
+                    if update_shown.is_none() && menu.insert(&update_item, 1).is_err() {
+                        log::warn!("couldn't add the update entry to the tray menu");
+                    }
+                }
+                None => {
+                    let _ = menu.remove(&update_item);
+                }
+            }
+            update_shown = wanted;
+        }
+
         if last.as_ref() != Some(&v) {
             status.set_text(&v.status);
             enabled.set_text(enabled_label(hotkey.active()));
             enabled.set_checked(v.enabled);
             autostart.set_checked(v.autostart);
+            updates.set_checked(v.check_updates);
             match &v.app_rule {
                 Some((label, checked)) => {
                     app.set_text(label);

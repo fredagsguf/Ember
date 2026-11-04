@@ -35,6 +35,9 @@ pub struct General {
     /// Minutes to ease in when the scheduled colour jumps instead of drifting: Ember starting
     /// in the evening, waking from sleep, an edited schedule. 0 = instant.
     pub jump_fade_minutes: f64,
+    /// Windows: ask GitHub now and then whether there's a newer Ember, and offer it in the tray
+    /// menu. Off by default; nothing is downloaded until the user picks the update.
+    pub check_for_updates: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -334,6 +337,7 @@ impl Default for General {
             preserve_calibration: true,
             toggle_hotkey: "Ctrl+Alt+End".into(),
             jump_fade_minutes: 7.0,
+            check_for_updates: false,
         }
     }
 }
@@ -627,6 +631,13 @@ pub fn edit_text_apply(text: &str, new: &Config) -> Result<String> {
             n.jump_fade_minutes,
             |x: f64| round_to(x, 1)
         );
+        sync!(
+            t,
+            "check_for_updates",
+            o.check_for_updates,
+            n.check_for_updates,
+            |x: bool| x
+        );
     }
     let (o, n) = (&old.color, &new.color);
     if o != n {
@@ -847,6 +858,18 @@ pub fn save(path: &Path, cfg: &Config) -> Result<()> {
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
     write_atomic(path, &edit_text_apply(&text, cfg)?)
+}
+
+/// Turn update checks on or off in the config file, leaving everything else as it is on disk.
+pub fn set_check_for_updates(path: &Path, on: bool) -> Result<()> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DEFAULT_CONFIG.to_string(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let mut cfg = Config::parse(&text).with_context(|| format!("parsing {}", path.display()))?;
+    cfg.general.check_for_updates = on;
+    write_atomic(path, &edit_text_apply(&text, &cfg)?)
 }
 
 pub fn ensure_exists(path: &Path) -> Result<()> {
@@ -1088,6 +1111,39 @@ temperature = 5000
         // Also when the key isn't in the file yet.
         let out = edit_text_apply("[general]\nfade_secs = 0.5\n", &cfg).unwrap();
         assert_eq!(Config::parse(&out).unwrap(), cfg);
+    }
+
+    #[test]
+    fn update_checks_default_off_and_toggle_in_the_file() {
+        assert!(!Config::default().general.check_for_updates);
+        assert!(
+            !Config::parse(DEFAULT_CONFIG)
+                .unwrap()
+                .general
+                .check_for_updates
+        );
+        assert!(!Config::parse("").unwrap().general.check_for_updates);
+
+        let dir = std::env::temp_dir().join(format!("ember-test-updates-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+        // No file yet: starts from the default config.
+        set_check_for_updates(&path, true).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("check_for_updates = true"), "{text}");
+        assert!(
+            text.contains("# Windows: ask GitHub"),
+            "keeps the comment: {text}"
+        );
+        set_check_for_updates(&path, false).unwrap();
+        assert!(!Config::load(&path).unwrap().general.check_for_updates);
+        // Older config files without the key get it added.
+        std::fs::write(&path, "[general]\nfade_secs = 1.0\n").unwrap();
+        set_check_for_updates(&path, true).unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert!(cfg.general.check_for_updates);
+        assert_eq!(cfg.general.fade_secs, 1.0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

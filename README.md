@@ -35,7 +35,7 @@ A warm screen in the evening is easier on your eyes and your sleep. But in a gam
 - **Gentle.** Every change fades in, also when you turn on your PC in the evening.
 - **Quick to pause.** For 15 minutes, an hour or until you turn it back on, or with **Ctrl+Alt+End**.
 - **Respects your monitors.** Keeps colour calibration, and can leave a screen untinted.
-- **Light and private.** One small program, no installer, and it never goes online.
+- **Light and private.** One small program, no installer, and it never goes online unless you turn on update checks.
 
 ## Get Ember
 
@@ -45,7 +45,7 @@ A warm screen in the evening is easier on your eyes and your sleep. But in a gam
 2. Run it. It sits in the system tray (Windows 11 may hide it behind the **^** next to the clock).
 3. Optional: tick **Start with Windows** in the tray menu.
 
-To update, quit Ember and run the new download. *Start with Windows* switches to it.
+To update, quit Ember and run the new download. *Start with Windows* switches to it. Or tick **Check for updates** in the tray menu: twice a day Ember asks GitHub for a newer release, and when there is one the menu offers **Update to Ember v…**. It asks before it downloads anything, checks the download against its SHA-256 checksum, and restarts with it. Update checks are off until you turn them on.
 
 The first launch shows *"Windows protected your PC"* because Ember isn't code-signed yet. Click **More info → Run anyway**.
 

@@ -16,6 +16,8 @@ pub enum Action {
     /// Add/remove a disable rule for the most recently used app.
     ToggleAppRule,
     ToggleAutostart,
+    /// Turn `general.check_for_updates` on/off (Windows).
+    ToggleUpdateCheck,
     /// Open the settings window, next to the tray icon if we know where it is.
     OpenSettings(Option<Anchor>),
     OpenConfig,
@@ -80,6 +82,8 @@ pub struct View {
     pub hotkey: Option<Hotkey>,
     /// Windows refuses warm colours until it's allowed to show them.
     pub warm_refused: bool,
+    /// `general.check_for_updates`, as the daemon last loaded it.
+    pub check_updates: bool,
 }
 
 /// The pause/resume hotkey in the config the daemon is running with. `None` until the daemon
@@ -97,6 +101,7 @@ pub fn view(state: &State) -> View {
     let enabled = engine::paused().is_none();
     let autostart = crate::autostart::is_enabled();
     let hotkey = hotkey(state);
+    let check_updates = matches!(state, State::Running(s) if s.config.general.check_for_updates);
     match state {
         State::Starting => View {
             status: "Starting…".into(),
@@ -108,6 +113,7 @@ pub fn view(state: &State) -> View {
             autostart,
             hotkey,
             warm_refused: false,
+            check_updates,
         },
         State::Failed(e) => View {
             status: format!("Error: {}", truncate(e, 60)),
@@ -119,6 +125,7 @@ pub fn view(state: &State) -> View {
             autostart,
             hotkey,
             warm_refused: false,
+            check_updates,
         },
         State::Running(s) => {
             let k = s.setting.temperature;
@@ -159,6 +166,7 @@ pub fn view(state: &State) -> View {
                 autostart,
                 hotkey,
                 warm_refused: s.warm_refused,
+                check_updates,
             }
         }
     }
@@ -214,6 +222,12 @@ pub fn perform(action: Action, daemon: &Handle, config_path: &Path) -> Result<bo
             }
         }
         Action::ToggleAutostart => crate::autostart::set_enabled(!crate::autostart::is_enabled())?,
+        Action::ToggleUpdateCheck => {
+            let on =
+                matches!(daemon.state(), State::Running(s) if s.config.general.check_for_updates);
+            crate::config::set_check_for_updates(config_path, !on)?;
+            log::info!("update checks {}", if on { "off" } else { "on" });
+        }
         Action::OpenSettings(anchor) => {
             let exe = std::env::current_exe()?;
             let mut cmd = std::process::Command::new(exe);

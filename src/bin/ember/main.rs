@@ -31,6 +31,9 @@ struct Cli {
     /// Tray icon position (x,y,width,height in physical pixels) to open the settings window at
     #[arg(long, hide = true, requires = "settings")]
     anchor: Option<ember::tray_model::Anchor>,
+    /// Started by an update: wait for the Ember with this process id to quit first
+    #[arg(long, hide = true, conflicts_with = "settings")]
+    replaces: Option<u32>,
 }
 
 fn init_logging(file_name: &str) {
@@ -59,6 +62,15 @@ fn main() {
         return;
     }
     init_logging("ember.log");
+    #[cfg(windows)]
+    if let Some(pid) = cli.replaces {
+        // It holds the instance lock and the displays until it has quit.
+        ember::update::wait_for_exit(pid, std::time::Duration::from_secs(30));
+        ember::update::cleanup_after_update();
+        log::info!("updated to Ember {}", env!("CARGO_PKG_VERSION"));
+    }
+    #[cfg(not(windows))]
+    let _ = cli.replaces;
     let opts = daemon::Options {
         config_path: config_path.clone(),
         dry_run: cli.dry_run,

@@ -1180,6 +1180,9 @@ impl eframe::App for SettingsApp {
                     ui.checkbox(&mut self.cfg.general.preserve_calibration, "Keep my display's calibration curve")
                         .on_hover_text("Tint on top of the ICC/VCGT curve loaded by your calibration software, and put it back when Ember turns off. Untick to reset to neutral instead.");
                     #[cfg(windows)]
+                    ui.checkbox(&mut self.cfg.general.check_for_updates, "Check for updates")
+                        .on_hover_text("Twice a day, ask GitHub whether there's a newer Ember. When there is, the tray menu offers it; nothing is downloaded until you choose to update.");
+                    #[cfg(windows)]
                     ui.horizontal(|ui| {
                         if gamma::full_gamma_range_allowed() {
                             ui.weak("Windows allows colours warmer than 4000 K.");

@@ -12,5 +12,6 @@ pub mod rules;
 pub mod schedule;
 pub mod solar;
 pub mod tray_model;
+pub mod update;
 #[cfg(windows)]
 pub mod win;
